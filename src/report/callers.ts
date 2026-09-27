@@ -11,7 +11,7 @@
 
 import type { AnalyzedFunction, CallTreeNode, Metric, ProfileAnalysis } from "../model.js";
 import { buildCallTree, groupKeyPaths } from "../model.js";
-import { formatPercent, formatValue, isSpecialFrame, metricUnit, roundShare, roundTreeShares, shQuote } from "./summary.js";
+import { formatFrameCount, formatPercent, formatValue, isSpecialFrame, metricUnit, roundShare, roundTreeShares, shQuote } from "./summary.js";
 
 const DEFAULT_COUNT = 10;
 
@@ -90,6 +90,11 @@ function renderNodes(
   for (const node of nodes) {
     lines.push(`  ${formatValue(metric, node.value).padStart(8)}  ${formatPercent(node.share).padStart(6)}  ${indent}${label(node)}`);
     renderNodes(node.children, node.childrenCut, metric, depth + 1, profilePath, fn, windowArgs, lines);
+    if (node.depthCut === true) {
+      lines.push(
+        `  ${indent}  … deeper: ${formatValue(metric, node.depthCutValue ?? 0)} in ${formatFrameCount(node.depthCutFrames ?? 0)} (finderscope callers ${shQuote(profilePath)} ${shQuote(node.key)}${windowArgs})`,
+      );
+    }
   }
   if (childrenCut > 0) {
     const shown = nodes.length + childrenCut;

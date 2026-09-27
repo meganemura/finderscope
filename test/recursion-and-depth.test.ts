@@ -5,7 +5,8 @@ import { test } from "vitest";
 import assert from "node:assert/strict";
 import { analyzeCpuProfile } from "../src/model.js";
 import { parseCpuProfile } from "../src/profile/cpu.js";
-import { buildCalleesTree } from "../src/report/callees.js";
+import { buildCalleesTree, formatCalleesTreeText } from "../src/report/callees.js";
+import { buildCallersTree, formatCallersTreeText } from "../src/report/callers.js";
 
 const ROOT = "/project";
 
@@ -64,5 +65,18 @@ test("a node truncated by the depth limit (not the children budget) carries dept
   const cRow = bRow.children.find((c) => !c.isSelf)!;
   assert.equal(cRow.key, fnC.key);
   assert.equal(cRow.depthCut, true);
+  assert.equal(cRow.depthCutValue, 2000);
+  assert.equal(cRow.depthCutFrames, 1);
   assert.equal(cRow.children.length, 0, "D is not shown at all - depthCut says so instead");
+  assert.match(
+    formatCalleesTreeText(data, "profile.cpuprofile"),
+    /… deeper: 2\.0ms in 1 frame \(finderscope callees 'profile\.cpuprofile' 'C src\/c\.js:1:1'\)/,
+  );
+
+  const fnD = [...analysis.functions.values()].find((f) => f.name === "D")!;
+  const callers = buildCallersTree(analysis, fnD, "profile.cpuprofile");
+  assert.match(
+    formatCallersTreeText(callers, "profile.cpuprofile"),
+    /… deeper: 2\.0ms in 2 frames \(finderscope callers 'profile\.cpuprofile' 'B src\/b\.js:1:1'\)/,
+  );
 });

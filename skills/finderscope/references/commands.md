@@ -35,12 +35,15 @@ The default output merges direct callers into a tree.
 This command shows how a function spends its inclusive time.
 The default output merges direct callees into a tree.
 `--expand` opens non-own subtrees. `--paths` selects the flat path list.
+Nodes stopped by the depth limit report the hidden value and a command that expands the node.
 
 ## Lines
 
 `finderscope lines '<profile>' '<function>' [--from ms --to ms] [-n N] [--json]`
 
-This command ranks source lines by self time. `-n` sets a positive result limit.
+This command ranks source lines by self time. It also lists direct callees and the lines where each
+callee name appears as a call expression. These source matches are not measured call sites.
+`-n` sets a positive result limit.
 
 ## Diff
 

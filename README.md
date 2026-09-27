@@ -36,7 +36,9 @@ before running one. Neither works on a `.heapprofile` - it has no timestamps at 
 just that one.
 
 `<function>` accepts either a function key exactly as a report printed it (`name path:line:col`),
-or any substring of the name that matches exactly one function.
+or a bare name or name substring that matches exactly one function. Local path aliases resolve
+through `realpath`, including missing `/tmp` versus `/private/tmp` and `/var` versus `/private/var`
+paths on macOS. A failed lookup prints up to three runnable commands for the closest keys.
 
 Every `--json` report carries a top-level `unit` (`"us"` for a cpu profile, `"bytes"` for a heap
 profile) that every value and total in it is measured in; every share is a 0..1 fraction rounded to
@@ -48,7 +50,11 @@ hundreds of paths that differ only in how deep they happen to go inside one pack
 list of those told an agent nothing. A non-`own` subtree collapses into one line - the area and
 the first frame entered, with its total time - instead of expanding package internals; `--expand`
 lifts that. The function's own self time is its own `(self)` row. The older flat per-path list is
-still there, behind `--paths`.
+still there, behind `--paths`. A node stopped by the depth limit reports the hidden value and frame
+count, then names the command that expands it.
+
+`lines` also lists the selected function's direct callees. It reports the source lines where each
+callee name appears as a call expression. These lines are text matches, not measured call sites.
 
 ## Example
 

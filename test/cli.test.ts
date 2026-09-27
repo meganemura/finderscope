@@ -382,9 +382,26 @@ do: finderscope callees '${CPU_FIXTURE}' 'main src/main.js:10:3'
     const code = await main(["callers", CPU_FIXTURE, "zzz", ...ROOT, "--json"], io);
     assert.equal(code, 1);
     assert.deepEqual(JSON.parse(out.join("")), {
-      error: 'no function matches "zzz"; the do: command lists the function keys',
-      do: `finderscope top '${CPU_FIXTURE}'`,
+      error: 'no function matches "zzz"; the do: commands show the closest function keys',
+      do: `finderscope callers '${CPU_FIXTURE}' 'main src/main.js:10:3'`,
+      suggestions: [
+        `finderscope callers '${CPU_FIXTURE}' 'main src/main.js:10:3'`,
+        `finderscope callers '${CPU_FIXTURE}' '(idle)'`,
+        `finderscope callers '${CPU_FIXTURE}' '(root)'`,
+      ],
     });
+  });
+
+  test("an ambiguous bare name prints only runnable do commands", async () => {
+    const { io, out } = capture();
+    const code = await main(["callers", CPU_FIXTURE, "m", ...ROOT], io);
+    assert.equal(code, 1);
+    const commands = out.join("").split("\n").filter((line) => line.startsWith("do: ")).map((line) => line.slice(4));
+    assert.ok(commands.length > 0 && commands.length <= 3);
+    for (const command of commands) {
+      assert.match(command, /^finderscope callers /);
+      assert.equal(spawnSync("sh", ["-n", "-c", command]).status, 0);
+    }
   });
 
   test("an unknown flag on callees is a CliError with a do:", async () => {

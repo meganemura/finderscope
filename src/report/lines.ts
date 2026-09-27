@@ -1,27 +1,17 @@
 // Responsibility: `lines` - the hot lines inside one function, from V8's own `positionTicks`
 // (model.ts's computeLineSelfTimes turns those into ProfileAnalysis.lineSelfTimes/lineReadPaths):
-// ranked by self time, with the source text when the named file is readable. Exists because the
-// summary and callees/callers can point at a function that holds a lot of self time and go no
-// further - once one function IS the hot spot, "which of its lines" is a question only
-// positionTicks can answer at all.
-// Boundary: reshapes ProfileAnalysis's own lineSelfTimes/lineReadPaths for one already-resolved
-// function; does not compute the tick-to-time apportionment itself (model.ts does, once, at
-// analyze time - see model.ts's own comment on why that is not done lazily here instead).
+// ranked by self time, with safe source previews and source-text matches for direct callee names.
+// Exists because a hot caller can have little self time while its direct callees hold the cost.
+// Boundary: reshapes one already-resolved function and reads guarded source files. It does not
+// compute tick apportionment or infer measured call sites from source text.
 
 import { readFileSync, statSync } from "node:fs";
 import { extname } from "node:path";
-import type { AnalyzedFunction, Metric, ProfileAnalysis } from "../model.js";
+import { buildCallTree, type AnalyzedFunction, type Metric, type ProfileAnalysis } from "../model.js";
 import { formatPercent, formatValue, metricUnit, roundShare, shQuote } from "./summary.js";
 
 const DEFAULT_COUNT = 10;
-// "small compared with total" (design.md's own wording for this threshold): matches
-// summary.ts's own topSelf >= 0.2 "worth understanding on its own" bar, so an agent reading both
-// commands sees the same 20% line drawn twice, not two different unexplained numbers.
-const SELF_DOMINANT_MIN_SHARE = 0.2;
-// The next own function must still be a real contributor - a function with, say, 0.01% of the
-// profile's self time is not worth a whole extra `lines` round trip; `callees` on `fn` itself is
-// the more useful fallback there.
-const NEXT_OWN_MIN_SHARE = 0.01;
+const DEFAULT_CALLEE_COUNT = 10;
 // design.md's own "trimmed to about 100 chars" rule for a printed source line.
 const MAX_SOURCE_CHARS = 100;
 // A file bigger than this is never read for a one-line preview - a minified bundle can be
@@ -61,11 +51,23 @@ export interface LinesData {
   total: number;
   lines: LineEntry[];
   cut: number;
+  calleesBySourceLine: CalleeSourceEntry[];
+  calleesCut: number;
   /** Set, with `lines`/`cut` left empty/0, when this profile or this function has no positionTicks
    *  data at all - a fact about the profile, never an error. */
   note: string | undefined;
   /** The next command to run, without the leading "do: ". */
   do: string;
+}
+
+export interface CalleeSourceEntry {
+  key: string;
+  value: number;
+  /** Share of the selected function's inclusive total. */
+  share: number;
+  /** Source lines where the callee's name appears as a call expression. These are text matches,
+   *  not measured call sites; an empty list means no safe source match was available. */
+  nameAppearsOn: number[];
 }
 
 const NO_POSITION_TICKS_AT_ALL =
@@ -85,30 +87,6 @@ const SELF_TIME_ONLY_NOTE =
 // silently presented as equally exact.
 const WINDOWED_ESTIMATE_NOTE =
   "windowed: positionTicks has no timestamps, so each line's share is estimated from the whole profile's own per-line ratios, not counted specifically inside this window";
-
-/**
- * The `do:` rule: when this function's self time is a small share of the profile, its OWN lines
- * are not the interesting question yet - point at `callees`, where its time actually goes.
- * Otherwise this function's own code is a real hot spot, so the natural next step is the SAME
- * question about the next heaviest own function, not a different verb - `lines` again.
- * Falls back to `callees` on `fn` itself when there is no other own function left to ask about,
- * the same "nothing else qualifies" fallback every other report's chooseDo uses.
- */
-function chooseDo(analysis: ProfileAnalysis, fn: AnalyzedFunction, profilePath: string, windowArgs: string): string {
-  const total = analysis.total;
-  const fallback = `finderscope callees ${shQuote(profilePath)} ${shQuote(fn.key)}${windowArgs}`;
-  const selfShare = total > 0 ? fn.self / total : 0;
-  if (selfShare < SELF_DOMINANT_MIN_SHARE) {
-    return fallback;
-  }
-  const nextOwn = [...analysis.functions.values()]
-    .filter((f) => f.area === "own" && f.key !== fn.key && f.self > 0)
-    .sort((a, b) => b.self - a.self)[0];
-  if (nextOwn !== undefined && total > 0 && nextOwn.self / total >= NEXT_OWN_MIN_SHARE) {
-    return `finderscope lines ${shQuote(profilePath)} ${shQuote(nextOwn.key)}${windowArgs}`;
-  }
-  return fallback;
-}
 
 /** Collapses interior whitespace so a source line with leading indentation still prints on one
  *  report row, then trims to "about 100 chars" (design.md) with a `…` marker matching this
@@ -135,6 +113,15 @@ function isReadableSourceFile(path: string): boolean {
   }
 }
 
+function readSafeSource(path: string): string[] | undefined {
+  if (!isReadableSourceFile(path)) return undefined;
+  try {
+    return readFileSync(path, "utf8").split(/\r?\n/);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Reads one line's source text, caching a file's lines across the several rows `lines` prints
  * from the same file - a real function's hot lines routinely cluster in one script. Never throws:
@@ -147,22 +134,228 @@ function makeSourceReader(): (info: { path: string; line: number } | undefined) 
   return (info) => {
     if (info === undefined) return undefined;
     if (!cache.has(info.path)) {
-      let fileLines: string[] | undefined;
-      if (isReadableSourceFile(info.path)) {
-        try {
-          fileLines = readFileSync(info.path, "utf8").split(/\r?\n/);
-        } catch {
-          fileLines = undefined;
-        }
-      }
-      cache.set(info.path, fileLines);
+      cache.set(info.path, readSafeSource(info.path));
     }
     const raw = cache.get(info.path)?.[info.line - 1];
     return raw !== undefined ? trimSource(raw) : undefined;
   };
 }
 
+function arrowBodyStart(lines: string[], startLine: number, startColumn: number): { lineIndex: number; column: number; block: boolean } | undefined {
+  let parenthesisDepth = 0;
+  let bracketDepth = 0;
+  for (let lineIndex = Math.max(0, startLine - 1); lineIndex < lines.length; lineIndex++) {
+    const sourceLine = lines[lineIndex]!;
+    for (let column = lineIndex === startLine - 1 ? Math.max(0, startColumn - 1) : 0; column < sourceLine.length; column++) {
+      const ch = sourceLine[column]!;
+      if (ch === "(") parenthesisDepth++;
+      else if (ch === ")") parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+      else if (ch === "[") bracketDepth++;
+      else if (ch === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+      // A brace outside parameters opens a normal function or method. An arrow after that brace
+      // belongs to the outer body and must not redefine its source range.
+      else if (ch === "{" && parenthesisDepth === 0 && bracketDepth === 0) return undefined;
+      else if (ch === "=" && sourceLine[column + 1] === ">") {
+        let bodyLine = lineIndex;
+        let bodyColumn = column + 2;
+        while (bodyLine < lines.length) {
+          const line = lines[bodyLine]!;
+          while (bodyColumn < line.length && /\s/.test(line[bodyColumn]!)) bodyColumn++;
+          if (bodyColumn < line.length) return { lineIndex: bodyLine, column: bodyColumn, block: line[bodyColumn] === "{" };
+          bodyLine++;
+          bodyColumn = 0;
+        }
+        return { lineIndex, column: column + 2, block: false };
+      }
+    }
+  }
+  return undefined;
+}
+
+function conventionalBodyStart(lines: string[], startLine: number, startColumn: number): { lineIndex: number; column: number } | undefined {
+  let parenthesisDepth = 0;
+  let bracketDepth = 0;
+  for (let lineIndex = Math.max(0, startLine - 1); lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex]!;
+    for (let column = lineIndex === startLine - 1 ? Math.max(0, startColumn - 1) : 0; column < line.length; column++) {
+      const ch = line[column]!;
+      if (ch === "(") parenthesisDepth++;
+      else if (ch === ")") parenthesisDepth = Math.max(0, parenthesisDepth - 1);
+      else if (ch === "[") bracketDepth++;
+      else if (ch === "]") bracketDepth = Math.max(0, bracketDepth - 1);
+      else if (ch === "{" && parenthesisDepth === 0 && bracketDepth === 0) return { lineIndex, column };
+    }
+  }
+  return undefined;
+}
+
+function expressionEndLine(lines: string[], start: { lineIndex: number; column: number }): number {
+  let depth = 0;
+  let sawToken = false;
+  for (let lineIndex = start.lineIndex; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex]!;
+    for (let i = lineIndex === start.lineIndex ? start.column : 0; i < line.length; i++) {
+      const ch = line[i]!;
+      if (!/\s/.test(ch)) sawToken = true;
+      if (ch === "(" || ch === "[" || ch === "{") depth++;
+      else if (ch === ")" || ch === "]" || ch === "}") depth = Math.max(0, depth - 1);
+      else if (ch === ";" && depth === 0) return lineIndex + 1;
+    }
+    if (sawToken && depth === 0) {
+      const current = line.trimEnd();
+      const next = lines.slice(lineIndex + 1).find((candidate) => candidate.trim() !== "")?.trimStart() ?? "";
+      const continuesAfter = /(?:[?:.,+\-*/%&|^=!<>]|\b(?:in|instanceof))$/.test(current);
+      const continuesBefore = /^(?:[?:.,+\-*/%&|^=<>]|\?\?|&&|\|\||\(|\[)/.test(next);
+      if (!continuesAfter && !continuesBefore) return lineIndex + 1;
+    }
+  }
+  return start.lineIndex + 1;
+}
+
+/** Finds the closing brace for a conventional function body. The small scanner ignores braces
+ * in strings and comments. An expression-body arrow ends at its own semicolon instead of taking
+ * the next block in the file as its body. */
+function functionEndLine(lines: string[], startLine: number, startColumn: number): number {
+  const arrow = arrowBodyStart(lines, startLine, startColumn);
+  if (arrow !== undefined && !arrow.block) return expressionEndLine(lines, arrow);
+  const body = arrow ?? conventionalBodyStart(lines, startLine, startColumn);
+  if (body === undefined) return startLine;
+  let depth = 0;
+  let opened = false;
+  const firstLine = body.lineIndex;
+  for (let lineIndex = firstLine; lineIndex < lines.length; lineIndex++) {
+    const line = lines[lineIndex]!;
+    for (let i = lineIndex === firstLine ? body.column : 0; i < line.length; i++) {
+      const ch = line[i]!;
+      if (ch === "{") {
+        opened = true;
+        depth++;
+      } else if (ch === "}" && opened) {
+        depth--;
+        if (depth === 0) return lineIndex + 1;
+      }
+    }
+  }
+  return startLine;
+}
+
+function codeOnlyLines(lines: string[]): string[] {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let blockComment = false;
+  let template = false;
+  let templateExpressionDepth = 0;
+  let regex = false;
+  let regexClass = false;
+  const result: string[] = [];
+  for (const line of lines) {
+    let code = "";
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i]!;
+      const next = line[i + 1];
+      if (blockComment) {
+        code += " ";
+        if (ch === "*" && next === "/") { code += " "; blockComment = false; i++; }
+        continue;
+      }
+      if (quote !== undefined) {
+        code += " ";
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === quote) quote = undefined;
+        continue;
+      }
+      if (template) {
+        code += " ";
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === "`") template = false;
+        else if (ch === "$" && next === "{") {
+          code += " ";
+          template = false;
+          templateExpressionDepth = 1;
+          i++;
+        }
+        continue;
+      }
+      if (regex) {
+        code += " ";
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === "[" && !regexClass) regexClass = true;
+        else if (ch === "]" && regexClass) regexClass = false;
+        else if (ch === "/" && !regexClass) regex = false;
+        continue;
+      }
+      if (ch === "/" && next === "/") {
+        code += " ".repeat(line.length - i);
+        break;
+      }
+      if (ch === "/" && next === "*") { code += "  "; blockComment = true; i++; continue; }
+      if (ch === "/" && regexCanStart(code)) { code += " "; regex = true; regexClass = false; continue; }
+      if (ch === "'" || ch === '"') { code += " "; quote = ch; continue; }
+      if (ch === "`") { code += " "; template = true; continue; }
+      if (templateExpressionDepth > 0 && ch === "{") templateExpressionDepth++;
+      else if (templateExpressionDepth > 0 && ch === "}") {
+        templateExpressionDepth--;
+        if (templateExpressionDepth === 0) {
+          code += " ";
+          template = true;
+          continue;
+        }
+      }
+      code += ch;
+    }
+    result.push(code);
+  }
+  return result;
+}
+
+function regexCanStart(code: string): boolean {
+  const before = code.trimEnd();
+  return before === ""
+    || /[([{,:;=!?&|+\-*%^~<>]$/.test(before)
+    || /\b(?:return|throw|case|delete|void|typeof|instanceof|in|of|yield|await)$/.test(before);
+}
+
+function escapedRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function calleeNameLines(lines: string[] | undefined, startLine: number, startColumn: number, name: string): number[] {
+  if (lines === undefined || !/^[$_\p{ID_Start}][$\u200C\u200D_\p{ID_Continue}]*$/u.test(name)) return [];
+  const code = codeOnlyLines(lines);
+  const endLine = functionEndLine(code, startLine, startColumn);
+  const identifier = "[$\\u200C\\u200D_\\p{ID_Continue}]";
+  const escaped = escapedRegex(name);
+  const call = new RegExp(`(?:\\.${escaped}|(?<!${identifier})${escaped})\\s*\\(`, "gu");
+  const rangeLines = code.slice(startLine - 1, endLine);
+  if (rangeLines.length > 0) rangeLines[0] = " ".repeat(Math.max(0, startColumn - 1)) + rangeLines[0]!.slice(Math.max(0, startColumn - 1));
+  const range = rangeLines.join("\n");
+  const found = new Set<number>();
+  for (const match of range.matchAll(call)) {
+    const before = range.slice(0, match.index);
+    found.add(startLine + (before.match(/\n/g)?.length ?? 0));
+  }
+  return [...found];
+}
+
+function buildCalleesBySourceLine(analysis: ProfileAnalysis, fn: AnalyzedFunction): { entries: CalleeSourceEntry[]; cut: number } {
+  const direct = buildCallTree(analysis, fn, "down", { depth: 1, expand: true, childrenPerLevel: Number.MAX_SAFE_INTEGER })
+    .children.filter((node) => !node.isSelf && node.value > 0);
+  const location = analysis.functionReadPaths.get(fn.key);
+  const source = location === undefined ? undefined : readSafeSource(location.path);
+  const all = direct.map((node) => ({
+    key: node.key,
+    value: node.value,
+    share: roundShare(node.share),
+    nameAppearsOn: calleeNameLines(source, location?.line ?? 1, location?.column ?? 1, analysis.functions.get(node.key)?.name ?? ""),
+  }));
+  return { entries: all.slice(0, DEFAULT_CALLEE_COUNT), cut: Math.max(0, all.length - DEFAULT_CALLEE_COUNT) };
+}
+
 export function buildLines(analysis: ProfileAnalysis, fn: AnalyzedFunction, profilePath: string, n = DEFAULT_COUNT, windowArgs = ""): LinesData {
+  const callees = buildCalleesBySourceLine(analysis, fn);
   const base = {
     metric: analysis.metric,
     unit: metricUnit(analysis.metric),
@@ -171,6 +364,8 @@ export function buildLines(analysis: ProfileAnalysis, fn: AnalyzedFunction, prof
     total: analysis.total,
     lines: [],
     cut: 0,
+    calleesBySourceLine: callees.entries,
+    calleesCut: callees.cut,
   };
   const fallbackDo = `finderscope callees ${shQuote(profilePath)} ${shQuote(fn.key)}${windowArgs}`;
 
@@ -209,7 +404,7 @@ export function buildLines(analysis: ProfileAnalysis, fn: AnalyzedFunction, prof
     lines: shown,
     cut: Math.max(0, entries.length - n),
     note: windowArgs.length > 0 ? WINDOWED_ESTIMATE_NOTE : SELF_TIME_ONLY_NOTE,
-    do: chooseDo(analysis, fn, profilePath, windowArgs),
+    do: fallbackDo,
   };
 }
 
@@ -233,6 +428,23 @@ export function formatLinesText(data: LinesData, profilePath: string, windowArgs
   if (data.note !== undefined) {
     lines.push(`note: ${data.note}`);
   }
+  lines.push("");
+  lines.push("callees by source line (name matches, not measured):");
+  // An unreadable source (a deleted build, a stripped bundle) fails every row the
+  // same way. Repeating the same line under each callee is refused as noise.
+  const anyCallSiteFound = data.calleesBySourceLine.some((callee) => callee.nameAppearsOn.length > 0);
+  for (const callee of data.calleesBySourceLine) {
+    lines.push(`  ${formatValue(data.metric, callee.value).padStart(8)}  ${formatPercent(callee.share).padStart(6)}  ${callee.key}`);
+    if (!anyCallSiteFound) continue;
+    lines.push(callee.nameAppearsOn.length > 0
+      ? `    name appears on: ${callee.nameAppearsOn.join(", ")}`
+      : "    call site not found in source");
+  }
+  if (data.calleesBySourceLine.length > 0 && !anyCallSiteFound) {
+    lines.push("  call sites not found in source for any callee");
+  }
+  if (data.calleesBySourceLine.length === 0) lines.push("  no direct callees");
+  if (data.calleesCut > 0) lines.push(`  … ${data.calleesCut} more`);
   lines.push("");
   lines.push(`do: ${data.do}`);
   return lines.join("\n");

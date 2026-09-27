@@ -38,7 +38,10 @@ finderscope --help | -h | help
 `finderscope <command> --help` は、その command だけを表示する。
 
 `<function>` には、report が表示した function key（`name path:line:col`）を指定できる。
-名前の一部が 1 個の function だけに一致する場合は、その一部も指定できる。
+function 名、または名前の一部が 1 個の function だけに一致する場合も指定できる。
+local path の別名は `realpath` で解決する。
+macOS では、file が存在しない場合も `/tmp` と `/private/tmp`、`/var` と `/private/var` を同じ path として扱う。
+一致しない場合は、近い key を使った実行可能な command を最大 3 個表示する。
 
 すべての `--json` report は最上位に `unit` を持つ。CPU profile では `"us"`、heap profile
 では `"bytes"` であり、すべての value と total はこの単位を使う。share は 0 から 1 の値で、
@@ -50,6 +53,11 @@ finderscope --help | -h | help
 エージェントの判断に役立たない。`own` ではない subtree は、area、最初の frame、total time を
 1 行にまとめる。`--expand` は package 内部も展開する。function 自身の self time は `(self)`
 行になる。以前の path ごとの一覧は `--paths` で表示できる。
+深さの上限で止まった node は、表示しなかった value と frame 数を示し、その node を展開する command を表示する。
+
+`lines` は、選択した function の直接の callee も表示する。
+各 callee について、callee 名が call expression として現れる source line を示す。
+この line は文字列の一致であり、計測した call site ではない。
 
 ## 例
 

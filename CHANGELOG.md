@@ -3,6 +3,23 @@
 The format follows Keep a Changelog, and the versions follow SemVer. Before 1.0, a minor version
 may change commands, flags, or output shapes. The version entry will describe each change.
 
+## Unreleased
+
+### Added
+
+- `lines` reports direct callees and the source lines where each callee name appears.
+- Depth-limited call-tree nodes report the hidden value, frame count, and expansion command.
+
+### Changed
+
+- Function lookup accepts unique bare names and local path aliases.
+- Failed function lookup prints up to three runnable commands for close keys.
+
+### Fixed
+
+- `diff` chooses its next command only from rows visible at the requested result limit.
+- Depth-limited caller trees no longer look like leaf nodes.
+
 ## 0.1.0 (2026-09-27)
 
 ### Added

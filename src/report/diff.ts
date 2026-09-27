@@ -75,10 +75,8 @@ function areaShareIn(analysis: ProfileAnalysis, total: number): (area: string) =
  * change but an area changed -> that area's own top list, in `after`. No change at all -> nothing
  * to drill into.
  */
-// Takes the ROUNDED, already-filtered lists (functionsRounded/areasRounded, not the raw
-// functionEntries/areaEntries) - design.md's carried-over fix: a row whose delta rounds to 0.000
-// is dropped from the displayed list precisely because the report shows nothing that size there,
-// so `do:` naming it anyway would point at a row the reader can never find in the output above.
+// Takes the ROUNDED, displayed lists after the `-n` cut. A row hidden by rounding or the output
+// budget cannot become the next command's target because the reader cannot find it above.
 function chooseDo(functions: DiffEntry[], areas: AreaDiffEntry[], after: ProfileAnalysis, beforePath: string, afterPath: string): string {
   const topFunction = functions.find((f) => !isSpecialFrame(f.key));
   if (topFunction !== undefined) {
@@ -125,7 +123,7 @@ export function buildDiff(before: ProfileAnalysis, after: ProfileAnalysis, befor
     .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
 
   // Rounded from the raw (unrounded) entries above: functionEntries and areaEntries stay raw for
-  // chooseDo and for the delta!==0 filter above, matching every other report's rule of never
+  // the delta!==0 filter above, matching every other report's rule of never
   // rounding a value a threshold or an equality check still needs to read exactly. A row whose
   // delta rounds to 0.000 - a real, nonzero raw delta too small for 3 decimals to show at all - is
   // then dropped here, same as every other ranked list never carrying a value-0 row: shown here as
@@ -149,7 +147,7 @@ export function buildDiff(before: ProfileAnalysis, after: ProfileAnalysis, befor
     functionsCut: Math.max(0, functionsRounded.length - n),
     areas,
     areasCut: Math.max(0, areasRounded.length - n),
-    do: chooseDo(functionsRounded, areasRounded, after, beforePath, afterPath),
+    do: chooseDo(functions, areas, after, beforePath, afterPath),
   };
 }
 

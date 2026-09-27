@@ -116,8 +116,11 @@ DevTools' own Memory panel.
   `load` / `analyze` / `report` in turn - its phase split without a follow-up command, provided
   every phase sits within 3 levels of its own root; a deeper split still needs `callees`.
 - A function is printed as `name path:line:col`, with 1-based line and column. The same text works
-  as the `<function>` argument, so an agent can copy it into the next command. A plain substring of
-  the name also works when it matches one function.
+  as the `<function>` argument, so an agent can copy it into the next command. A bare name or a
+  plain substring of the name also works when it matches one function. A full key resolves both
+  paths through `realpath`; a missing typed path also checks the macOS `/tmp` and `/private/tmp`,
+  or `/var` and `/private/var`, aliases. A failed lookup prints up to three runnable commands for
+  close keys, ordered by the same function name, then the same file, then edit distance.
 - When a script has a source map (a `sourceMappingURL` comment or a sibling `.map` file), positions
   are mapped back to the original source, such as a `.ts` file. The mapping uses a small built-in VLQ
   decoder, not a dependency.
@@ -139,10 +142,10 @@ DevTools' own Memory panel.
   is a real, different call edge, not folded.
 - A tree node stopped by the DEPTH limit (not by the per-level children budget, which already has
   its own "… N more" hint) - an own node, or any node under `--expand`, that still has real,
-  nonzero-value children below it that the tree never descended into at all - prints a bare `…`
-  line naming the command that expands it (`finderscope callees <profile> <that node's key>`), so
-  it never looks like a real leaf. This applies to "your code, top down" and to `callees`; `callers`
-  walks upward toward the root, where there is no such thing as "more below" to hint at.
+  nonzero-value frames past it prints their combined value and count. The marker names the command
+  that expands the node: `callees` while walking down, and `callers` while walking up. The JSON
+  node carries `depthCut`, `depthCutValue`, and `depthCutFrames`. A printed `(self)` row is excluded
+  from `depthCutValue`, so the marker equals the node value minus every printed child.
 - A function's own self time can be all `callers`/`callees` ever say about it: neither one splits a
   function's self time any further, so a function that holds a real share of the whole profile as
   its own self time - and stays that way after reading its callers and callees - leaves an agent
@@ -191,15 +194,13 @@ DevTools' own Memory panel.
   line), and only under a real code extension (`.js` `.mjs` `.cjs` `.jsx` `.ts` `.mts` `.cts`
   `.tsx` `.vue` `.svelte` `.astro`) - so a map naming, say, `~/.ssh/id_rsa` never gets that file's
   first line printed as a "preview". Failing any of those checks is silent, the same as a plain
-  unreadable file: no `source` on that row, never an error. Its own `do:` prefers the same verb
-  again: once a function's self time is a real share of the profile (>= 20%, the same bar the
-  summary's own `do:` uses elsewhere for "this one function is worth understanding on its own"),
-  the next useful question is the SAME one about the next heaviest own function by self time - not
-  a different verb - so `do:` suggests `lines` for it, but only when that next function itself
-  holds at least 1% of the total; below THAT bar it is not worth a whole extra round trip either,
-  and `do:` falls back to `callees` on the current function instead. Below the 20% bar in the first
-  place, this function's own lines are not yet the interesting question - `do:` suggests `callees`
-  instead, to find where the time actually goes. The summary's own `do:` rule gained one more step
+  unreadable file: no `source` on that row, never an error. After these rows, `lines` lists at most
+  10 direct callees from the same folded call tree as `callees`. For each callee, it searches the
+  selected function's mapped source body for the callee name as an identifier followed by `(`,
+  including `.name(` property calls. The report says `name appears on` because these are
+  source-text matches, not measured call sites. An unreadable source or no match prints `call site
+  not found in source`. The final `do:` opens `callees` for the same function. The summary's own
+  `do:` rule gained one more step
   for the same reason: when the top OWN function by self time holds at least 10% of the profile
   total AND this profile actually has positionTicks recorded for it, summary's `do:` prefers `lines`
   for it too, ahead of the older "point at its callers" rule - once an own function is provably
@@ -259,9 +260,9 @@ below also shares the top-level `unit` field described above.
 (`note` is a heap-only field - JSON.stringify drops a `note`/`area` field entirely rather than
 writing it as `null` when there is none, matching every other command below with an optional field.
 A `CallTreeNode` - here and in every tree below - also carries `recursive: true` when that node
-calls itself directly, and `depthCut: true` when the depth limit, not the children budget, is why
-it shows no children despite having real ones; both are omitted, never `false`, when they don't
-apply. `window: { "from": 0, "to": 5400 }` appears only when `--from`/`--to` was given - `total`
+calls itself directly. A depth-limited node carries `depthCut: true`, `depthCutValue: 1200`, and
+`depthCutFrames: 2`; these fields are omitted when the limit does not apply. `window: { "from": 0,
+"to": 5400 }` appears only when `--from`/`--to` was given - `total`
 above is then already the window's own total, and every `do:`/cut-hint command embeds the same
 `--from`/`--to` so a follow-up command never silently drops the window.)
 
@@ -340,6 +341,10 @@ the named file was still readable on disk):
     ...
   ],
   "cut": 0,
+  "calleesBySourceLine": [
+    { "key": "helper src/helper.js:2:1", "value": 2900, "share": 0.659, "nameAppearsOn": [13, 18] }
+  ],
+  "calleesCut": 0,
   "note": "each row is self time only - V8's positionTicks never carries a call site, so a line that calls a hot function looks cold here; see where a line's time goes with the callees command",
   "do": "finderscope callees '<profile>' 'main src/main.js:10:3'"
 }
@@ -353,7 +358,7 @@ When the profile carries no `positionTicks` at all, or none for this function, `
 it:
 ```json
 { "metric": "time", "unit": "us", "function": "main src/main.js:10:3", "self": 4400, "total": 5400,
-  "lines": [], "cut": 0,
+  "lines": [], "cut": 0, "calleesBySourceLine": [], "calleesCut": 0,
   "note": "this profile has no positionTicks at all - an older Node build, or a .heapprofile, never carries per-line tick data",
   "do": "finderscope callees '<profile>' 'main src/main.js:10:3'" }
 ```
@@ -412,10 +417,10 @@ bucket's own heaviest own function by self time; it is omitted (never `null`) wh
 no own self time at all. `do` points `--from`/`--to` at the heaviest bucket, in milliseconds
 (the unit `--from`/`--to` itself takes, not `unit` above).
 
-Every error - a bad flag, a malformed profile, an internal bug - is the same two-field shape under
-`--json`, whichever command raised it:
+Every error carries `error` and one runnable `do` under `--json`. A failed function lookup also
+carries up to three runnable `suggestions`, including the command in `do`:
 ```json
-{ "error": "cannot read profile file <path>", "do": "check the path: ls '<path>'" }
+{ "error": "no function matches ...", "do": "finderscope lines ...", "suggestions": ["finderscope lines ..."] }
 ```
 
 ## Invariants the tests hold
@@ -450,6 +455,8 @@ These are properties, tested with generated profiles:
   total - the same integer boundaries decide both.
 - `diff`'s `do:` never names a function or area whose own delta rounded to 0.000 - the same rule
   the displayed `functions`/`areas` lists already apply to themselves.
+- A function key resolves to itself. A realpath alias of its path resolves to the same function.
+- A depth marker's value equals its node value minus its printed children and `(self)` row.
 
 Exact text and JSON shape are covered by example tests on small fixture profiles.
 

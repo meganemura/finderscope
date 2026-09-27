@@ -4,6 +4,7 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
 import * as hegel from "@hegeldev/hegel";
+import * as gs from "@hegeldev/hegel/generators";
 import { parseCpuProfile } from "../src/profile/cpu.js";
 import { analyzeCpuProfile } from "../src/model.js";
 import { buildDiff } from "../src/report/diff.js";
@@ -58,6 +59,29 @@ test(
         assert.equal(data.areasCut, 0);
       },
       { testCases: 100 },
+    );
+  },
+  20_000,
+);
+
+test(
+  "diff's do target appears in the rows that the report prints",
+  () => {
+    hegel.test(
+      (tc) => {
+        const before = analyzeCpuProfile(parseCpuProfile(drawCpuProfileJson(tc, 10, 20)), { root: "/project" });
+        const after = analyzeCpuProfile(parseCpuProfile(drawCpuProfileJson(tc, 10, 20)), { root: "/project" });
+        const n = tc.draw(gs.integers({ minValue: 1, maxValue: 10 }));
+        const data = buildDiff(before, after, "before.cpuprofile", "after.cpuprofile", n);
+        if (data.do.startsWith("finderscope callees ")) {
+          assert.ok(data.functions.some((row) => data.do.endsWith(`'${row.key}'`)));
+        } else if (data.do.includes(" --area ")) {
+          assert.ok(data.areas.some((row) => data.do.endsWith(`'${row.area}'`)));
+        } else {
+          assert.equal(data.do, "finderscope top 'after.cpuprofile'");
+        }
+      },
+      { testCases: 150 },
     );
   },
   20_000,

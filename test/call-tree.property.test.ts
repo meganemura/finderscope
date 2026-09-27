@@ -7,6 +7,7 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
 import * as hegel from "@hegeldev/hegel";
+import * as gs from "@hegeldev/hegel/generators";
 import { parseCpuProfile } from "../src/profile/cpu.js";
 import { analyzeCpuProfile, buildCallTree, buildTopDown, type CallTreeNode, type ProfileAnalysis } from "../src/model.js";
 import { drawCpuProfileJson } from "./helpers/profile-gen.js";
@@ -131,6 +132,35 @@ test(
         }
       },
       { testCases: 150 },
+    );
+  },
+  20_000,
+);
+
+test(
+  "a depth marker equals its node value minus every printed child and self row",
+  () => {
+    hegel.test(
+      (tc) => {
+        const profile = parseCpuProfile(drawCpuProfileJson(tc, 20, 30));
+        const analysis = analyzeCpuProfile(profile, { root: "/project" });
+        const depth = tc.draw(gs.integers({ minValue: 1, maxValue: 4 }));
+        for (const fn of analysis.functions.values()) {
+          for (const direction of ["down", "up"] as const) {
+            const tree = buildCallTree(analysis, fn, direction, { depth, expand: true, childrenPerLevel: 10_000 });
+            const pending = [...tree.children];
+            while (pending.length > 0) {
+              const node = pending.pop()!;
+              pending.push(...node.children);
+              if (node.depthCut !== true) continue;
+              const printed = node.children.reduce((sum, child) => sum + child.value, 0);
+              assert.equal(node.depthCutValue, node.value - printed);
+              assert.ok((node.depthCutFrames ?? 0) > 0);
+            }
+          }
+        }
+      },
+      { testCases: 100 },
     );
   },
   20_000,

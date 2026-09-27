@@ -304,6 +304,11 @@ export function formatPercent(share: number): string {
   return `${(share * 100).toFixed(1)}%`;
 }
 
+// The depth marker reads as a sentence, so one frame must not print as "1 frames".
+export function formatFrameCount(count: number): string {
+  return `${count} ${count === 1 ? "frame" : "frames"}`;
+}
+
 function labelTopDownNode(node: CallTreeNode): string {
   const base = node.isSelf ? "(self)" : node.area === "own" ? node.key : `${node.area}: ${node.key}`;
   return node.recursive === true ? `${base} (recursive)` : base;
@@ -332,7 +337,9 @@ function renderTopDownChildren(
     lines.push(`  ${formatValue(metric, node.value).padStart(8)}  ${formatPercent(node.share).padStart(6)}  ${indent}${labelTopDownNode(node)}`);
     renderTopDownChildren(node.children, node.childrenCut, metric, depth + 1, profilePath, node.key, windowArgs, lines);
     if (node.depthCut === true) {
-      lines.push(`  ${indent}  … (finderscope callees ${shQuote(profilePath)} ${shQuote(node.key)}${windowArgs})`);
+      lines.push(
+        `  ${indent}  … deeper: ${formatValue(metric, node.depthCutValue ?? 0)} in ${formatFrameCount(node.depthCutFrames ?? 0)} (finderscope callees ${shQuote(profilePath)} ${shQuote(node.key)}${windowArgs})`,
+      );
     }
   }
   if (childrenCut > 0) {
@@ -354,7 +361,9 @@ function renderTopDown(data: SummaryData, profilePath: string, windowArgs: strin
     lines.push(`  ${formatValue(data.metric, root.value).padStart(8)}  ${formatPercent(root.share).padStart(6)}  ${root.recursive === true ? `${root.key} (recursive)` : root.key}`);
     renderTopDownChildren(root.children, root.childrenCut, data.metric, 1, profilePath, root.key, windowArgs, lines);
     if (root.depthCut === true) {
-      lines.push(`    … (finderscope callees ${shQuote(profilePath)} ${shQuote(root.key)}${windowArgs})`);
+      lines.push(
+        `    … deeper: ${formatValue(data.metric, root.depthCutValue ?? 0)} in ${formatFrameCount(root.depthCutFrames ?? 0)} (finderscope callees ${shQuote(profilePath)} ${shQuote(root.key)}${windowArgs})`,
+      );
     }
   }
   if (data.topDownCut > 0) {

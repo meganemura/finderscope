@@ -276,11 +276,13 @@ function parseWindow(options: Map<string, string | boolean>, usage: string): { w
   return { window, windowArgs: ` --from ${fromRaw} --to ${toRaw}` };
 }
 
-function printError(io: Io, json: boolean, message: string, doLine: string): number {
+function printError(io: Io, json: boolean, message: string, doLine: string, suggestions: string[] = []): number {
+  const commands = [...new Set([doLine, ...suggestions])];
   if (json) {
-    io.stdout(`${JSON.stringify({ error: message, do: doLine })}\n`);
+    const extra = commands.length > 1 ? { suggestions: commands } : {};
+    io.stdout(`${JSON.stringify({ error: message, do: doLine, ...extra })}\n`);
   } else {
-    io.stdout(`error: ${message}\ndo: ${doLine}\n`);
+    io.stdout(`error: ${message}\n${commands.map((command) => `do: ${command}`).join("\n")}\n`);
   }
   return 1;
 }
@@ -434,7 +436,13 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       const { window, windowArgs } = parseWindow(options, `finderscope ${subcommand} ${shQuote(profilePath)} ${shQuote(query)} --from ms --to ms`);
       return attributeUnexpectedErrorsTo([profilePath], () => {
         const analysis = loadAnalysis(profilePath, root, window);
-        const fn = resolveFunction(analysis, query, `finderscope top ${shQuote(profilePath)}`, root);
+        const fn = resolveFunction(
+          analysis,
+          query,
+          `finderscope top ${shQuote(profilePath)}`,
+          root,
+          (key) => `finderscope ${subcommand} ${shQuote(profilePath)} ${shQuote(key)}${windowArgs}`,
+        );
         if (subcommand === "callers") {
           if (paths) {
             const data = buildCallersPaths(analysis, fn, profilePath, n, windowArgs);
@@ -470,7 +478,13 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       const { window, windowArgs } = parseWindow(options, `finderscope lines ${shQuote(profilePath)} ${shQuote(query)} --from ms --to ms`);
       return attributeUnexpectedErrorsTo([profilePath], () => {
         const analysis = loadAnalysis(profilePath, root, window);
-        const fn = resolveFunction(analysis, query, `finderscope top ${shQuote(profilePath)}`, root);
+        const fn = resolveFunction(
+          analysis,
+          query,
+          `finderscope top ${shQuote(profilePath)}`,
+          root,
+          (key) => `finderscope lines ${shQuote(profilePath)} ${shQuote(key)}${windowArgs}`,
+        );
         const data = buildLines(analysis, fn, profilePath, n, windowArgs);
         io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatLinesText(data, profilePath, windowArgs)}\n`);
         return 0;
@@ -599,7 +613,11 @@ export async function main(argv: string[], io: Io): Promise<number> {
     return await dispatch(argv, io);
   } catch (e) {
     if (hasDoLine(e)) {
-      return printError(io, json, e.message, e.do);
+      const rawSuggestions = (e as Error & { do: string; suggestions?: unknown }).suggestions;
+      const suggestions = Array.isArray(rawSuggestions)
+        ? rawSuggestions.filter((value): value is string => typeof value === "string")
+        : [];
+      return printError(io, json, e.message, e.do, suggestions);
     }
     // Reached only by a bug outside attributeUnexpectedErrorsTo's reach (argument parsing itself,
     // before dispatch picks a profile path) - still a finderscope bug, not the caller's problem.

@@ -71,6 +71,10 @@ export interface ProfileAnalysis {
    * the same real file and line by construction (mapGeneratedLine's key IS that file and line).
    */
   lineReadPaths: Map<string, { path: string; line: number }>;
+  /** Function definition positions in readable source files, after source-map resolution. The
+   *  lines report uses these positions to search only the selected function's source body for
+   *  callee names. */
+  functionReadPaths: Map<string, { path: string; line: number; column: number }>;
 }
 
 /** Microseconds, half-open [from, to) - a sample counts when its own start offset
@@ -136,6 +140,11 @@ export interface ClassifyResult {
   key: string;
   name: string;
   area: string;
+  /** Present only when the displayed position maps to an ordinary local path. Reading remains
+   *  guarded by report/lines.ts; this field only preserves the source-map result. */
+  readablePath?: string;
+  line?: number;
+  column?: number;
 }
 
 interface PathClassification {
@@ -297,7 +306,13 @@ export function classify(node: GenericNode, projectRoot: string, mapper: SourceM
 
   const { area, displayPath } = fromUrl ? classifyMappedSourceUrl(rawPath) : classifyPath(rawPath, projectRoot);
   const key = `${name} ${displayPath}:${outLine}:${outColumn}`;
-  return { key, name, area };
+  const result: ClassifyResult = { key, name, area };
+  if (!fromUrl) {
+    result.readablePath = rawPath;
+    result.line = outLine;
+    result.column = outColumn;
+  }
+  return result;
 }
 
 export interface MappedLine {
@@ -615,6 +630,11 @@ export interface CallTreeNode {
    *  count - and an agent has no sign there is more to see. Omitted (never `false`) for the same
    *  reason `recursive` is. */
   depthCut?: true;
+  /** Value hidden only because of the depth limit. It excludes every printed child, including a
+   *  printed `(self)` row, so the marker and the node still reconcile exactly. */
+  depthCutValue?: number;
+  /** Number of distinct direct frames hidden by the depth limit. */
+  depthCutFrames?: number;
 }
 
 export interface CallTreeOptions {
@@ -716,16 +736,33 @@ function buildCallTreeLevel(
     const expandable = area === "own" || options.expand;
     const hasDeeper = group.rest.some((c) => c.value > 0 && c.keys.length > 0);
     const descend = expandable && depthRemaining > 1;
+    const limited = !descend && expandable && hasDeeper
+      ? foldDirectRecursion(group.rest, key)
+      : undefined;
+    const limitedSelf = limited === undefined || !options.includeSelf
+      ? 0
+      : limited.chains.filter((c) => c.value > 0 && c.keys.length === 0).reduce((sum, c) => sum + c.value, 0);
+    const limitedChildren = limitedSelf > 0
+      ? [{ key: "(self)", area: "own", value: limitedSelf, share: share(limitedSelf), isSelf: true, children: [], childrenCut: 0 } satisfies CallTreeNode]
+      : [];
     const sub = descend
       ? buildCallTreeLevel(group.rest, areaOf, total, depthRemaining - 1, key, options)
-      : { nodes: [], cut: 0, recursive: false };
+      : { nodes: limitedChildren, cut: 0, recursive: limited?.recursive ?? false };
     const node: CallTreeNode = { key, area, value: group.value, share: share(group.value), isSelf: false, children: sub.nodes, childrenCut: sub.cut };
     if (sub.recursive) node.recursive = true;
     // Only a real, would-be-expandable node that stopped for lack of depth (not one already
     // deliberately collapsed because it is a non-own, non-expanded subtree - that collapse is
     // documented as such by its own line, not a truncation) gets this marker, and only when
     // something with real value actually sits below it.
-    if (expandable && !descend && hasDeeper) node.depthCut = true;
+    if (limited !== undefined) {
+      const hidden = limited.chains.filter((c) => c.value > 0 && c.keys.length > 0);
+      const hiddenValue = hidden.reduce((sum, c) => sum + c.value, 0);
+      if (hiddenValue > 0) {
+        node.depthCut = true;
+        node.depthCutValue = hiddenValue;
+        node.depthCutFrames = new Set(hidden.flatMap((c) => c.keys)).size;
+      }
+    }
     nodes.push(node);
   }
   return { nodes, cut, recursive };
@@ -839,8 +876,12 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
   const info = buildNodeInfo(input.nodes, input.root, mapper);
 
   const keyMeta = new Map<string, { area: string; name: string }>();
+  const functionReadPaths = new Map<string, { path: string; line: number; column: number }>();
   for (const c of info.values()) {
     if (!keyMeta.has(c.key)) keyMeta.set(c.key, { area: c.area, name: c.name });
+    if (c.readablePath !== undefined && c.line !== undefined && c.column !== undefined && !functionReadPaths.has(c.key)) {
+      functionReadPaths.set(c.key, { path: c.readablePath, line: c.line, column: c.column });
+    }
   }
 
   const functions = new Map<string, AnalyzedFunction>();
@@ -881,7 +922,7 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
   const hottest = groupKeyPaths(paths, areaOf, input.total, foldAroundOwnFrames).slice(0, input.hottestPathCount);
   const handoffs = computeHandoffs(paths, areaOf);
 
-  return { metric: input.metric, total: input.total, functions, areaTotals, hottest, paths, handoffs, lineSelfTimes, lineReadPaths };
+  return { metric: input.metric, total: input.total, functions, areaTotals, hottest, paths, handoffs, lineSelfTimes, lineReadPaths, functionReadPaths };
 }
 
 /**
