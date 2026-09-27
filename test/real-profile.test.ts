@@ -120,11 +120,10 @@ test("a real profile of a tsc-compiled script maps positions back to the .ts sou
   }
 });
 
-// Regression: mapGeneratedLine (model.ts) used to map a positionTicks line at column 0
-// (mapper.map(url, line, 0)), which found NOTHING on an indented line - tsc's own compiled output
-// starts hotFunction's body (original.ts's own lines 8-12) at column 2 or 4, never 0. `lines`
-// silently fell back to the unmapped .js position every time on real, ordinary compiled TypeScript
-// - this is the exact case the review that caught it asked for.
+// tsc starts each indented line's first segment at the token's column (2 or 4 in hotFunction's
+// body, original.ts lines 8-12), never at column 0. A positionTicks line must therefore map through
+// the first mapped segment on the generated line; a lookup at column 0 finds nothing and leaves
+// ordinary compiled TypeScript at its unmapped .js position.
 test("`lines` on a real profile of the tsc-compiled fixture maps its hot, indented line back to the .ts source", () => {
   const { outDir, compiled } = compileMappedSourceFixture();
   try {
