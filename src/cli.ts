@@ -336,13 +336,15 @@ const COMMAND_HELP: Record<string, string> = {
   callees: "finderscope callees '<profile>' '<function>' [--expand] [--paths] [--from ms --to ms] [-n N] [--json]\n  Where the function's own total time goes.",
   lines: "finderscope lines '<profile>' '<function>' [--from ms --to ms] [-n N] [--json]\n  The hot lines inside the function's own body.",
   diff: "finderscope diff '<before>' '<after>' [-n N] [--json]\n  The functions and areas whose share changed most.",
-  run: "finderscope run [--heap] [--heap-peak] [--root dir] -- '<command...>'\n  Runs the command, then prints the summary for each profile it wrote.",
+  run: "finderscope run [--heap] [--heap-peak] [--root dir] [--json] -- '<command...>'\n  Runs the command, then prints the summary for each profile it wrote.",
   timeline: "finderscope timeline '<profile>' [--json]\n  20 equal time buckets, each with the top own function by self time - pick a --from/--to window from this.",
 };
 
 // Stated once, in full words, alongside every "ms" in a usage line above it - "ms" alone in a
 // usage string reads as a value the caller types, not a unit; this line makes the unit explicit.
-const FROM_TO_UNIT_NOTE = "--from/--to are milliseconds, offset from the profile's own start.";
+const FROM_TO_UNIT_NOTE = "--from/--to are milliseconds, offset from the profile's own start. summary, top, callers, callees and lines accept them.";
+// Only these commands take a window; diff, run and timeline reject --from/--to.
+const WINDOW_COMMANDS = new Set(["summary", "top", "callers", "callees", "lines"]);
 
 function globalHelpText(): string {
   const lines = ["finderscope: turn a V8 profile into a short, ranked report and name the next command", ""];
@@ -354,7 +356,8 @@ function globalHelpText(): string {
 
 function subcommandHelpText(subcommand: string): string {
   const text = COMMAND_HELP[subcommand] ?? COMMAND_HELP["summary"]!;
-  return `${text}\n\n${FROM_TO_UNIT_NOTE}\n\ndo: ${HELP_DO}`;
+  const note = WINDOW_COMMANDS.has(subcommand) ? `\n\n${FROM_TO_UNIT_NOTE}` : "";
+  return `${text}${note}\n\ndo: ${HELP_DO}`;
 }
 
 async function dispatch(argv: string[], io: Io): Promise<number> {
