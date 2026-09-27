@@ -13,14 +13,24 @@ npm install --save-dev finderscope
 ## Commands
 
 ```
-finderscope <profile> [--root dir] [--json]
-finderscope top <profile> [--by self|total|root] [--area <area>] [-n N] [--json]
-finderscope callers <profile> <function> [--expand] [--paths] [-n N] [--json]
-finderscope callees <profile> <function> [--expand] [--paths] [-n N] [--json]
-finderscope lines <profile> <function> [-n N] [--json]
+finderscope <profile> [--root dir] [--from ms --to ms] [--json]
+finderscope top <profile> [--by self|total|root] [--area <area>] [--from ms --to ms] [-n N] [--json]
+finderscope callers <profile> <function> [--expand] [--paths] [--from ms --to ms] [-n N] [--json]
+finderscope callees <profile> <function> [--expand] [--paths] [--from ms --to ms] [-n N] [--json]
+finderscope lines <profile> <function> [--from ms --to ms] [-n N] [--json]
 finderscope diff <before> <after> [-n N] [--json]
-finderscope run [--heap] [--root dir] -- <command...>
+finderscope run [--heap] [--heap-peak] [--root dir] -- <command...>
+finderscope timeline <profile> [--json]
+finderscope --help | -h | help
 ```
+
+`--from`/`--to` (decimal milliseconds, offsets from the profile's own start, both required
+together) restrict a report to the samples inside that window - every number in it becomes
+relative to the window, and the summary prints the window it used. `timeline` splits a cpu profile
+into 20 equal buckets, each with the top own function by self time, so an agent can pick a window
+before running one. Neither works on a `.heapprofile` - it has no timestamps at all. `--help` (and
+`-h`, `help`) prints every command's usage in one screen; `finderscope <command> --help` prints
+just that one.
 
 `<function>` accepts either a function key exactly as a report printed it (`name path:line:col`),
 or any substring of the name that matches exactly one function.
@@ -81,7 +91,11 @@ POSIX-style, so it survives `sh -c` unchanged whatever it contains (a space, a `
 and SIGINT/SIGTERM are forwarded to the profiled command. With `--heap`, the report's own total is
 what was still live in memory when the profiled process exited - not the peak it reached along the
 way; the `do:` line for a heap profile also points at measuring the real peak
-(`/usr/bin/time -l <command>` on macOS, or `--heapsnapshot-near-heap-limit`).
+(`/usr/bin/time -l <command>` on macOS, or `--heapsnapshot-near-heap-limit`). `run --heap-peak`
+adds `--heapsnapshot-near-heap-limit` for you, but only when the profiled command also caps the
+heap with `--max-old-space-size` - without a cap V8 never approaches a limit, so the flag would
+never fire; `run` reports the snapshot's path (finderscope does not read it itself) or, when there
+was no cap to work with, says so instead of silently adding nothing.
 
 `own` means real source the agent can edit, not "under `--root`": a `file://` url or an absolute
 path outside `node_modules`, wherever it actually lives - a profiled program's own code is `own`

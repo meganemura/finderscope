@@ -60,7 +60,7 @@ test("`lines` on a real profile of our own fixture names a line inside the busy 
     const busy = [...analysis.functions.values()].find((f) => f.name === "busy")!;
 
     const data = buildLines(analysis, busy, "profile.cpuprofile");
-    assert.equal(data.note, undefined, "expected real V8 output to carry positionTicks for a busy loop");
+    assert.doesNotMatch(data.note ?? "", /no positionTicks/, "expected real V8 output to carry positionTicks for a busy loop");
     assert.ok(data.lines.length > 0, "expected at least one ranked line");
     // busy()'s own body (function busy(n) { ... }) spans lines 3-9 (1-based) of the fixture -
     // the loop and its body that actually burn the self time this test profiled.
@@ -134,7 +134,7 @@ test("`lines` on a real profile of the tsc-compiled fixture maps its hot, indent
       const hot = [...analysis.functions.values()].find((f) => f.name === "hotFunction")!;
 
       const data = buildLines(analysis, hot, "profile.cpuprofile");
-      assert.equal(data.note, undefined, "expected real V8 output to carry positionTicks for hotFunction's loop");
+      assert.doesNotMatch(data.note ?? "", /no positionTicks/, "expected real V8 output to carry positionTicks for hotFunction's loop");
       assert.ok(data.lines.length > 0, "expected at least one ranked line");
       const top = data.lines[0]!;
       assert.match(

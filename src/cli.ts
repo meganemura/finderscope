@@ -11,7 +11,7 @@
 
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { analyzeCpuProfile, analyzeHeapProfile, type ProfileAnalysis } from "./model.js";
+import { analyzeCpuProfile, analyzeHeapProfile, buildTimeline, type ProfileAnalysis, type TimeWindow } from "./model.js";
 import { detectProfileKind, ProfileShapeError } from "./profile/detect.js";
 import { parseCpuProfile } from "./profile/cpu.js";
 import { parseHeapProfile } from "./profile/heap.js";
@@ -22,6 +22,7 @@ import { buildCallersPaths, buildCallersTree, formatCallersPathsText, formatCall
 import { buildCalleesPaths, buildCalleesTree, formatCalleesPathsText, formatCalleesTreeText } from "./report/callees.js";
 import { buildDiff, formatDiffText } from "./report/diff.js";
 import { buildLines, formatLinesText } from "./report/lines.js";
+import { buildTimelineData, formatTimelineText } from "./report/timeline.js";
 import { shQuote } from "./report/summary.js";
 import { runCommand } from "./run.js";
 
@@ -95,7 +96,7 @@ interface ParsedArgs {
   options: Map<string, string | boolean>;
 }
 
-const BOOLEAN_FLAGS = new Set(["json", "heap", "expand", "paths"]);
+const BOOLEAN_FLAGS = new Set(["json", "heap", "heap-peak", "expand", "paths"]);
 
 /**
  * A single hand-written pass: `--name value` and `--name=value` both set an option; a flag in
@@ -170,7 +171,7 @@ function parsePositiveInt(raw: string | undefined, usage: string): number | unde
   return value;
 }
 
-function loadAnalysis(path: string, root: string): ProfileAnalysis {
+function readProfileJson(path: string): { json: unknown; kind: "cpu" | "heap" } {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
@@ -191,6 +192,11 @@ function loadAnalysis(path: string, root: string): ProfileAnalysis {
   } catch (e) {
     throw new CliError((e as Error).message, `pass a .cpuprofile or .heapprofile written by node --cpu-prof / --heap-prof`);
   }
+  return { json, kind };
+}
+
+function loadAnalysis(path: string, root: string, window?: TimeWindow): ProfileAnalysis {
+  const { json, kind } = readProfileJson(path);
 
   // parseCpuProfile/parseHeapProfile validate the profile's own shape (nodes, samples, ...) and
   // throw ProfileShapeError, a deliberate, expected error about a malformed file - the same kind
@@ -201,13 +207,73 @@ function loadAnalysis(path: string, root: string): ProfileAnalysis {
   // instead - which is what the padEnd crash this fixed actually was.
   try {
     if (kind === "cpu") {
-      return analyzeCpuProfile(parseCpuProfile(json), { root });
+      return analyzeCpuProfile(parseCpuProfile(json), { root, window });
+    }
+    // A heap profile has no timestamps at all - a real caller mistake to report as such, not
+    // silently ignored (which would make --from/--to look like it worked) and not a finderscope
+    // bug (there is nothing wrong with the profile itself).
+    if (window !== undefined) {
+      throw new CliError(
+        `${path} is a heap profile - it has no timestamps, so --from/--to only works on a .cpuprofile`,
+        `open ${shQuote(path)} without --from/--to`,
+      );
     }
     return analyzeHeapProfile(parseHeapProfile(json), { root });
   } catch (e) {
     if (!(e instanceof ProfileShapeError)) throw e;
     throw new CliError(e.message, `open ${shQuote(path)} and check its nodes/samples/timeDeltas, or its head, shape`);
   }
+}
+
+/**
+ * Loads a cpu profile for `timeline` specifically - never windowed (a timeline exists to let an
+ * agent pick a window in the first place) and never valid for a heap profile (no timestamps at
+ * all), the same rule loadAnalysis enforces for --from/--to.
+ */
+function loadCpuProfileForTimeline(path: string) {
+  const { json, kind } = readProfileJson(path);
+  if (kind !== "cpu") {
+    throw new CliError(
+      `${path} is a heap profile - it has no timestamps, so timeline only works on a .cpuprofile`,
+      `run finderscope ${shQuote(path)} instead`,
+    );
+  }
+  try {
+    return parseCpuProfile(json);
+  } catch (e) {
+    if (!(e instanceof ProfileShapeError)) throw e;
+    throw new CliError(e.message, `open ${shQuote(path)} and check its nodes/samples/timeDeltas, or its head, shape`);
+  }
+}
+
+/**
+ * Parses `--from <ms>`/`--to <ms>` (decimal MILLISECONDS, converted to integer microseconds) into
+ * a half-open TimeWindow, plus the exact `--from .../--to ...` suffix every do:/cut-hint command in
+ * the same report must carry so the next command an agent runs does not silently drop the window.
+ * Both are offsets from the profile's own observed span start (model.ts's samplePosition -
+ * NormalizedCpuProfile.spanStart, the first sample's own position, not absolute zero: a real
+ * profile always has a nonzero gap, timeDeltas[0], before its first sample even exists), so `--from
+ * 0` means "starting at the first sample", the same point `timeline`'s bucket 0 starts from.
+ * Requires BOTH flags together, never just one: an open-ended window would need either an Infinity
+ * (not valid JSON) or the profile's own span (which loadAnalysis does not know before it has
+ * already analyzed the profile) as its missing bound - requiring both sidesteps that with no loss
+ * an agent would actually miss, since "from the start" is `--from 0` and "to the end" needs the end
+ * anyway, which `timeline` prints for every bucket.
+ */
+function parseWindow(options: Map<string, string | boolean>, usage: string): { window: TimeWindow | undefined; windowArgs: string } {
+  const fromRaw = optionString(options, "from");
+  const toRaw = optionString(options, "to");
+  if (fromRaw === undefined && toRaw === undefined) return { window: undefined, windowArgs: "" };
+  if (fromRaw === undefined || toRaw === undefined) {
+    throw new CliError("--from and --to must be given together", usage);
+  }
+  const fromMs = Number(fromRaw.trim());
+  const toMs = Number(toRaw.trim());
+  if (!Number.isFinite(fromMs) || fromMs < 0) throw new CliError(`invalid --from ${fromRaw}`, usage);
+  if (!Number.isFinite(toMs) || toMs < 0) throw new CliError(`invalid --to ${toRaw}`, usage);
+  if (toMs < fromMs) throw new CliError(`--to ${toRaw} is before --from ${fromRaw}`, usage);
+  const window: TimeWindow = { from: Math.round(fromMs * 1000), to: Math.round(toMs * 1000) };
+  return { window, windowArgs: ` --from ${fromRaw} --to ${toRaw}` };
 }
 
 function printError(io: Io, json: boolean, message: string, doLine: string): number {
@@ -247,30 +313,83 @@ export function noProfileWarning(signal: NodeJS.Signals | null): { message: stri
 }
 
 const USAGE =
-  "usage: finderscope '<profile>' | top '<profile>' | callers '<profile>' '<fn>' [--expand] [--paths] | callees '<profile>' '<fn>' [--expand] [--paths] | lines '<profile>' '<fn>' | diff '<before>' '<after>' | run [--heap] -- '<command...>'";
+  "usage: finderscope '<profile>' [--from ms --to ms] | top '<profile>' | callers '<profile>' '<fn>' [--expand] [--paths] | callees '<profile>' '<fn>' [--expand] [--paths] | lines '<profile>' '<fn>' | diff '<before>' '<after>' | run [--heap] [--heap-peak] -- '<command...>' | timeline '<profile>' | help";
+
+/** Every token before the first literal "--" (run's own child-command separator) - a "-h"/"--help"
+ *  AFTER that boundary belongs to the profiled command, not to finderscope itself, and must never
+ *  trigger finderscope's own help instead of actually running it. */
+function wantsHelp(rest: string[]): boolean {
+  const dashDashIdx = rest.indexOf("--");
+  const scanned = dashDashIdx === -1 ? rest : rest.slice(0, dashDashIdx);
+  return scanned.includes("-h") || scanned.includes("--help");
+}
+
+// A real, concrete, always-runnable example - never a "finderscope ..." command with a
+// <placeholder> in it (the sh -n test's own rule: a "finderscope " command may never carry an
+// unresolved placeholder), since there is no profile in hand yet at the moment --help is read.
+const HELP_DO = "finderscope run -- node your-script.js";
+
+const COMMAND_HELP: Record<string, string> = {
+  summary: "finderscope '<profile>' [--root dir] [--from ms --to ms] [--json]\n  The summary: your code top down, areas, top functions, hottest paths, and do:.",
+  top: "finderscope top '<profile>' [--by self|total|root] [--area area] [--from ms --to ms] [-n N] [--json]\n  A longer ranked list.",
+  callers: "finderscope callers '<profile>' '<function>' [--expand] [--paths] [--from ms --to ms] [-n N] [--json]\n  Which call paths lead to the function.",
+  callees: "finderscope callees '<profile>' '<function>' [--expand] [--paths] [--from ms --to ms] [-n N] [--json]\n  Where the function's own total time goes.",
+  lines: "finderscope lines '<profile>' '<function>' [--from ms --to ms] [-n N] [--json]\n  The hot lines inside the function's own body.",
+  diff: "finderscope diff '<before>' '<after>' [-n N] [--json]\n  The functions and areas whose share changed most.",
+  run: "finderscope run [--heap] [--heap-peak] [--root dir] -- '<command...>'\n  Runs the command, then prints the summary for each profile it wrote.",
+  timeline: "finderscope timeline '<profile>' [--json]\n  20 equal time buckets, each with the top own function by self time - pick a --from/--to window from this.",
+};
+
+// Stated once, in full words, alongside every "ms" in a usage line above it - "ms" alone in a
+// usage string reads as a value the caller types, not a unit; this line makes the unit explicit.
+const FROM_TO_UNIT_NOTE = "--from/--to are milliseconds, offset from the profile's own start.";
+
+function globalHelpText(): string {
+  const lines = ["finderscope: turn a V8 profile into a short, ranked report and name the next command", ""];
+  for (const text of Object.values(COMMAND_HELP)) lines.push(text, "");
+  lines.push(FROM_TO_UNIT_NOTE, "");
+  lines.push(`do: ${HELP_DO}`);
+  return lines.join("\n");
+}
+
+function subcommandHelpText(subcommand: string): string {
+  const text = COMMAND_HELP[subcommand] ?? COMMAND_HELP["summary"]!;
+  return `${text}\n\n${FROM_TO_UNIT_NOTE}\n\ndo: ${HELP_DO}`;
+}
 
 async function dispatch(argv: string[], io: Io): Promise<number> {
   if (argv.length === 0) {
     throw new CliError("no command or profile given", USAGE);
   }
 
-  const KNOWN_SUBCOMMANDS = new Set(["top", "callers", "callees", "lines", "diff", "run"]);
+  const KNOWN_SUBCOMMANDS = new Set(["top", "callers", "callees", "lines", "diff", "run", "timeline", "help"]);
   const first = argv[0]!;
   const subcommand = KNOWN_SUBCOMMANDS.has(first) ? first : "summary";
   const rest = subcommand === "summary" ? argv : argv.slice(1);
+
+  if (subcommand === "help") {
+    io.stdout(`${globalHelpText()}\n`);
+    return 0;
+  }
+  if (wantsHelp(rest)) {
+    io.stdout(`${subcommand === "summary" ? globalHelpText() : subcommandHelpText(subcommand)}\n`);
+    return 0;
+  }
+
   const { positionals, options } = parseArgs(rest);
   const json = options.get("json") === true;
   const root = optionString(options, "root") ?? process.cwd();
 
   switch (subcommand) {
     case "summary": {
-      checkKnownOptions(options, new Set(["json", "root"]), USAGE);
+      checkKnownOptions(options, new Set(["json", "root", "from", "to"]), USAGE);
       const profilePath = positionals[0];
       if (profilePath === undefined) throw new CliError("no profile given", USAGE);
+      const { window, windowArgs } = parseWindow(options, `finderscope ${shQuote(profilePath)} --from ms --to ms`);
       return attributeUnexpectedErrorsTo([profilePath], () => {
-        const analysis = loadAnalysis(profilePath, root);
-        const data = buildSummary(analysis, profilePath);
-        io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatSummaryText(data, profilePath)}\n`);
+        const analysis = loadAnalysis(profilePath, root, window);
+        const data = buildSummary(analysis, profilePath, window, windowArgs);
+        io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatSummaryText(data, profilePath, windowArgs)}\n`);
         return 0;
       });
     }
@@ -278,18 +397,19 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
     case "top": {
       const profilePath = positionals[0];
       if (profilePath === undefined) throw new CliError("no profile given", `finderscope top '<profile>'`);
-      checkKnownOptions(options, new Set(["json", "root", "by", "area", "n"]), `finderscope top ${shQuote(profilePath)}`);
+      checkKnownOptions(options, new Set(["json", "root", "by", "area", "n", "from", "to"]), `finderscope top ${shQuote(profilePath)}`);
       const n = parsePositiveInt(optionString(options, "n"), `finderscope top ${shQuote(profilePath)} -n '<positive integer>'`);
       const by = optionString(options, "by");
       if (by !== undefined && by !== "self" && by !== "total" && by !== "root") {
         throw new CliError(`invalid --by ${by}; use self, total or root`,`finderscope top ${shQuote(profilePath)} --by self`);
       }
+      const { window, windowArgs } = parseWindow(options, `finderscope top ${shQuote(profilePath)} --from ms --to ms`);
       return attributeUnexpectedErrorsTo([profilePath], () => {
-        const analysis = loadAnalysis(profilePath, root);
+        const analysis = loadAnalysis(profilePath, root, window);
         const topOptions: TopOptions = { area: optionString(options, "area"), n };
         if (by !== undefined) topOptions.by = by;
-        const data = buildTop(analysis, profilePath, topOptions);
-        io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatTopText(data, profilePath)}\n`);
+        const data = buildTop(analysis, profilePath, topOptions, windowArgs);
+        io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatTopText(data, profilePath, windowArgs)}\n`);
         return 0;
       });
     }
@@ -301,31 +421,32 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       if (profilePath === undefined || query === undefined) {
         throw new CliError("need a profile and a function", `finderscope ${subcommand} '<profile>' '<function>'`);
       }
-      checkKnownOptions(options, new Set(["json", "root", "expand", "paths", "n"]), `finderscope ${subcommand} ${shQuote(profilePath)} ${shQuote(query)}`);
+      checkKnownOptions(options, new Set(["json", "root", "expand", "paths", "n", "from", "to"]), `finderscope ${subcommand} ${shQuote(profilePath)} ${shQuote(query)}`);
       const n = parsePositiveInt(
         optionString(options, "n"),
         `finderscope ${subcommand} ${shQuote(profilePath)} '<function>' -n '<positive integer>'`,
       );
       const paths = options.get("paths") === true;
       const expand = options.get("expand") === true;
+      const { window, windowArgs } = parseWindow(options, `finderscope ${subcommand} ${shQuote(profilePath)} ${shQuote(query)} --from ms --to ms`);
       return attributeUnexpectedErrorsTo([profilePath], () => {
-        const analysis = loadAnalysis(profilePath, root);
-        const fn = resolveFunction(analysis, query, `finderscope top ${shQuote(profilePath)}`);
+        const analysis = loadAnalysis(profilePath, root, window);
+        const fn = resolveFunction(analysis, query, `finderscope top ${shQuote(profilePath)}`, root);
         if (subcommand === "callers") {
           if (paths) {
-            const data = buildCallersPaths(analysis, fn, profilePath, n);
-            io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatCallersPathsText(data, profilePath)}\n`);
+            const data = buildCallersPaths(analysis, fn, profilePath, n, windowArgs);
+            io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatCallersPathsText(data, profilePath, windowArgs)}\n`);
           } else {
-            const data = buildCallersTree(analysis, fn, profilePath, { expand, n });
-            io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatCallersTreeText(data, profilePath)}\n`);
+            const data = buildCallersTree(analysis, fn, profilePath, { expand, n }, windowArgs);
+            io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatCallersTreeText(data, profilePath, windowArgs)}\n`);
           }
         } else {
           if (paths) {
-            const data = buildCalleesPaths(analysis, fn, profilePath, n);
-            io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatCalleesPathsText(data, profilePath)}\n`);
+            const data = buildCalleesPaths(analysis, fn, profilePath, n, windowArgs);
+            io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatCalleesPathsText(data, profilePath, windowArgs)}\n`);
           } else {
-            const data = buildCalleesTree(analysis, fn, profilePath, { expand, n });
-            io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatCalleesTreeText(data, profilePath)}\n`);
+            const data = buildCalleesTree(analysis, fn, profilePath, { expand, n }, windowArgs);
+            io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatCalleesTreeText(data, profilePath, windowArgs)}\n`);
           }
         }
         return 0;
@@ -338,16 +459,30 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       if (profilePath === undefined || query === undefined) {
         throw new CliError("need a profile and a function", `finderscope lines '<profile>' '<function>'`);
       }
-      checkKnownOptions(options, new Set(["json", "root", "n"]), `finderscope lines ${shQuote(profilePath)} ${shQuote(query)}`);
+      checkKnownOptions(options, new Set(["json", "root", "n", "from", "to"]), `finderscope lines ${shQuote(profilePath)} ${shQuote(query)}`);
       const n = parsePositiveInt(
         optionString(options, "n"),
         `finderscope lines ${shQuote(profilePath)} ${shQuote(query)} -n '<positive integer>'`,
       );
+      const { window, windowArgs } = parseWindow(options, `finderscope lines ${shQuote(profilePath)} ${shQuote(query)} --from ms --to ms`);
       return attributeUnexpectedErrorsTo([profilePath], () => {
-        const analysis = loadAnalysis(profilePath, root);
-        const fn = resolveFunction(analysis, query, `finderscope top ${shQuote(profilePath)}`);
-        const data = buildLines(analysis, fn, profilePath, n);
-        io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatLinesText(data, profilePath)}\n`);
+        const analysis = loadAnalysis(profilePath, root, window);
+        const fn = resolveFunction(analysis, query, `finderscope top ${shQuote(profilePath)}`, root);
+        const data = buildLines(analysis, fn, profilePath, n, windowArgs);
+        io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatLinesText(data, profilePath, windowArgs)}\n`);
+        return 0;
+      });
+    }
+
+    case "timeline": {
+      checkKnownOptions(options, new Set(["json", "root"]), `finderscope timeline '<profile>'`);
+      const profilePath = positionals[0];
+      if (profilePath === undefined) throw new CliError("no profile given", `finderscope timeline '<profile>'`);
+      return attributeUnexpectedErrorsTo([profilePath], () => {
+        const profile = loadCpuProfileForTimeline(profilePath);
+        const buckets = buildTimeline(profile, root);
+        const data = buildTimelineData(buckets, profile.totalDuration, profilePath);
+        io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatTimelineText(data, profilePath)}\n`);
         return 0;
       });
     }
@@ -373,20 +508,40 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
     }
 
     case "run": {
-      checkKnownOptions(options, new Set(["json", "root", "heap"]), "finderscope run [--heap] -- '<command...>'");
+      checkKnownOptions(options, new Set(["json", "root", "heap", "heap-peak"]), "finderscope run [--heap] [--heap-peak] -- '<command...>'");
       const heap = options.get("heap") === true;
-      const result = await runCommand({ heap, command: positionals });
+      const heapPeak = options.get("heap-peak") === true;
+      const result = await runCommand({ heap, heapPeak, command: positionals });
 
       // Never deleted, on purpose - stated here, not just in the README/design.md, since this is
       // the one moment an agent actually needs to know it can come back to this exact path.
       const scratchNote = `scratch dir: ${result.scratchDir} (kept on purpose - re-query it with finderscope callers/callees/top)`;
+      const heapSnapshotNote =
+        result.heapSnapshots.length > 0
+          ? `heap snapshot near the limit: ${result.heapSnapshots.join(", ")} (finderscope does not read this file - open it in Chrome DevTools' Memory panel)`
+          : undefined;
 
       if (result.profiles.length === 0) {
-        const warning = noProfileWarning(result.signal);
+        // A heap snapshot near the limit is real, useful output even when the command crashed
+        // before it could write a normal --cpu-prof/--heap-prof profile (an OOM kill routinely
+        // ends the process via a signal right after the snapshot itself was flushed to disk) -
+        // "rerun without sending it a signal" is the wrong advice here: nothing finderscope did
+        // sent that signal, and rerunning changes nothing about the crash. Point at the file that
+        // already exists instead.
+        const warning =
+          result.heapSnapshots.length > 0
+            ? {
+                message: "no cpu/heap profile was written - the command likely crashed while writing its heap snapshot near the limit, but that snapshot was written",
+                do: `ls -la ${shQuote(result.heapSnapshots[0]!)}`,
+              }
+            : noProfileWarning(result.signal);
         if (json) {
-          io.stdout(`${JSON.stringify({ scratchDir: result.scratchDir, profiles: [], errors: [], warning: warning.message, do: warning.do })}\n`);
+          io.stdout(
+            `${JSON.stringify({ scratchDir: result.scratchDir, profiles: [], errors: [], heapSnapshots: result.heapSnapshots, heapPeakNote: result.heapPeakNote, warning: warning.message, do: warning.do })}\n`,
+          );
         } else {
-          io.stdout(`${scratchNote}\nwarning: ${warning.message}\ndo: ${warning.do}\n`);
+          const extra = [heapSnapshotNote, result.heapPeakNote].filter((s): s is string => s !== undefined).map((s) => `note: ${s}\n`).join("");
+          io.stdout(`${scratchNote}\n${extra}warning: ${warning.message}\ndo: ${warning.do}\n`);
         }
         return result.exitCode;
       }
@@ -418,9 +573,12 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
 
       const overallDo = firstDo ?? "finderscope run -- '<command...>'";
       if (json) {
-        io.stdout(`${JSON.stringify({ scratchDir: result.scratchDir, profiles: summaries, errors, do: overallDo })}\n`);
+        io.stdout(
+          `${JSON.stringify({ scratchDir: result.scratchDir, profiles: summaries, errors, heapSnapshots: result.heapSnapshots, heapPeakNote: result.heapPeakNote, do: overallDo })}\n`,
+        );
       } else {
-        io.stdout(`${scratchNote}\n\n${textBlocks.join("\n\n")}\n`);
+        const extra = [heapSnapshotNote, result.heapPeakNote].filter((s): s is string => s !== undefined).map((s) => `note: ${s}\n`).join("");
+        io.stdout(`${scratchNote}\n${extra}\n${textBlocks.join("\n\n")}\n`);
       }
       return result.exitCode;
     }

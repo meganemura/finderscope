@@ -75,6 +75,10 @@ function areaShareIn(analysis: ProfileAnalysis, total: number): (area: string) =
  * change but an area changed -> that area's own top list, in `after`. No change at all -> nothing
  * to drill into.
  */
+// Takes the ROUNDED, already-filtered lists (functionsRounded/areasRounded, not the raw
+// functionEntries/areaEntries) - design.md's carried-over fix: a row whose delta rounds to 0.000
+// is dropped from the displayed list precisely because the report shows nothing that size there,
+// so `do:` naming it anyway would point at a row the reader can never find in the output above.
 function chooseDo(functions: DiffEntry[], areas: AreaDiffEntry[], after: ProfileAnalysis, beforePath: string, afterPath: string): string {
   const topFunction = functions.find((f) => !isSpecialFrame(f.key));
   if (topFunction !== undefined) {
@@ -145,7 +149,7 @@ export function buildDiff(before: ProfileAnalysis, after: ProfileAnalysis, befor
     functionsCut: Math.max(0, functionsRounded.length - n),
     areas,
     areasCut: Math.max(0, areasRounded.length - n),
-    do: chooseDo(functionEntries, areaEntries, after, beforePath, afterPath),
+    do: chooseDo(functionsRounded, areasRounded, after, beforePath, afterPath),
   };
 }
 

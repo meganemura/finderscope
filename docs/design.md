@@ -31,13 +31,37 @@ profiled program.
 
 | Command | Answers |
 |---|---|
-| `finderscope <profile>` | The summary: your code top down, split by area, top functions by self and by total, the hottest call paths, and a `do:` line. |
-| `finderscope top <profile> [--by self\|total\|root] [--area <area>] [-n N]` | A longer ranked list - `--by root` ranks "your code, top down"'s own roots. |
-| `finderscope callers <profile> <function>` | Which call paths lead to the function, with each path's share. |
-| `finderscope callees <profile> <function>` | Where the function's own total time goes. |
-| `finderscope lines <profile> <function>` | The hot lines inside the function's own body, from V8's own per-line sample counts. |
+| `finderscope <profile> [--from ms --to ms]` | The summary: your code top down, split by area, top functions by self and by total, the hottest call paths, and a `do:` line. |
+| `finderscope top <profile> [--by self\|total\|root] [--area <area>] [--from ms --to ms] [-n N]` | A longer ranked list - `--by root` ranks "your code, top down"'s own roots. |
+| `finderscope callers <profile> <function> [--from ms --to ms]` | Which call paths lead to the function, with each path's share. |
+| `finderscope callees <profile> <function> [--from ms --to ms]` | Where the function's own total time goes. |
+| `finderscope lines <profile> <function> [--from ms --to ms]` | The hot lines inside the function's own body, from V8's own per-line sample counts. |
 | `finderscope diff <before> <after>` | The functions and areas whose share changed most, sorted by the size of the change. |
-| `finderscope run [--heap] -- <command...>` | Runs the command with `--cpu-prof` (and `--heap-prof`) in a scratch directory, then prints the summary for each profile it wrote. |
+| `finderscope run [--heap] [--heap-peak] -- <command...>` | Runs the command with `--cpu-prof` (and `--heap-prof`) in a scratch directory, then prints the summary for each profile it wrote. |
+| `finderscope timeline <profile>` | 20 equal time buckets across a cpu profile, each with the top own function by self time - lets an agent pick a `--from`/`--to` window before it exists to guess one. |
+| `finderscope --help` / `-h` / `help` | The usage of every command in one screen. `finderscope <command> --help` prints just that command's own usage. |
+
+`--from <ms> --to <ms>` (decimal MILLISECONDS, offsets from the profile's own observed span -
+the first sample's own position, not absolute zero: a real profile always has a nonzero gap,
+the profiler's own startup delay, before its first sample even exists - half-open `[from, to)`)
+restricts `summary`/`top`/`callers`/`callees`/`lines` to the samples inside that window - every
+self/total/area/share number in the result is then relative to the WINDOW's own total, not the
+whole profile's, and the summary prints the window it used. `timeline` measures its own 20
+buckets against this exact same span, so a bucket's own `from 0` lines up with `--from 0` on
+every other command. A sample belongs to the window where it starts, with its whole duration,
+so a window's total can exceed the window's width when a long sample starts near its end; the
+windows of a partition still sum exactly to the whole. Both flags are required
+together (there is no open-ended "from here to the end" spelling - `timeline` already prints every
+bucket's own end, so the caller always has a concrete number to put there). A heap profile carries
+no timestamps at all, so `--from`/`--to` and `timeline` are both a caller error on one, with a
+`do:` that says so, not a silent no-op or a "finderscope bug". Every `do:` and `… more` command a
+windowed report prints carries the same `--from`/`--to`, so the next command an agent copies never
+silently drops the window. `lines` under a window still splits each line's OWN self time correctly
+(it filters samples before building the per-node self value `positionTicks` apportions), but
+`positionTicks` itself has no timestamps - it is one fixed array per node for the WHOLE profile -
+so the per-line SPLIT within a window is estimated from the whole profile's own per-line ratios,
+not counted specifically inside the window; `lines` says so in its own `note:` whenever a window
+is active.
 
 Every command also takes `--json`. The JSON carries the same facts as the text, with a stable shape
 (see "JSON shape" below). Every report's JSON carries a top-level `unit`: `"us"` for a cpu profile
@@ -58,6 +82,20 @@ largest first. It runs only the command the caller gave; SIGINT and SIGTERM are 
 The scratch directory holding every profile it wrote is never deleted, on purpose - it is the path
 an agent re-queries with `top`/`callers`/`callees` after reading the summary, and `run` prints it
 before it prints anything else for exactly that reason.
+
+`--heap` reports memory still LIVE when the profiled process exited, never the highest it reached
+along the way (a sampling heap profiler's own numbers are exactly that) - a transient PEAK needs a
+heap snapshot taken at the moment the process actually approached a limit, which `--heap` alone
+never takes. `run --heap-peak` adds `--heapsnapshot-near-heap-limit=1` (and `--diagnostic-dir`,
+pointed at the same scratch directory every other profile already lands in, since its own default
+is the caller's cwd and a real snapshot can be well over 100MB) - but ONLY when the command also
+caps the heap itself (`--max-old-space-size`, checked against the command's own argv and the
+existing `NODE_OPTIONS`): without a cap, V8 never approaches a heap LIMIT at all, so the flag would
+sit there and never fire. `--heap-peak` with no cap adds nothing and says so in a `note:`, rather
+than silently doing nothing and looking like it worked. finderscope does not read a `.heapsnapshot`
+itself (a full snapshot needs a streaming dominator-tree pass - a separate design, per "Scope of
+the first version" above); `run` only reports the path it landed at, for an agent to open in Chrome
+DevTools' own Memory panel.
 
 ## How the report reads
 
@@ -89,6 +127,19 @@ before it prints anything else for exactly that reason.
   `native` (an empty url - a V8 builtin with no source position at all).
 - Self time is the time of the samples whose top frame is the function. Total time is the time of the
   samples whose stack contains the function at least once, so recursion is not counted twice.
+- `callers`/`callees` (and "your code, top down") merge a DIRECT self-call (A calls A) into the
+  recursing node itself, rather than nesting the same function one level per recursion depth: the
+  recursive continuation's own self time joins that node's `(self)`, and its own further callees
+  merge into that node's `children` by key, so the tree shows the recursive function once, with its
+  real total, and a `(recursive)` marker - not a "the same name calling itself" chain that told an
+  agent nothing beyond "yes, it recurses". Mediated recursion (A calls B calls A) is unaffected - it
+  is a real, different call edge, not folded.
+- A tree node stopped by the DEPTH limit (not by the per-level children budget, which already has
+  its own "… N more" hint) - an own node, or any node under `--expand`, that still has real,
+  nonzero-value children below it that the tree never descended into at all - prints a bare `…`
+  line naming the command that expands it (`finderscope callees <profile> <that node's key>`), so
+  it never looks like a real leaf. This applies to "your code, top down" and to `callees`; `callers`
+  walks upward toward the root, where there is no such thing as "more below" to hint at.
 - A function's own self time can be all `callers`/`callees` ever say about it: neither one splits a
   function's self time any further, so a function that holds a real share of the whole profile as
   its own self time - and stays that way after reading its callers and callees - leaves an agent
@@ -118,6 +169,14 @@ before it prints anything else for exactly that reason.
   When NO node in the whole profile carries `positionTicks` (an older Node build, or a
   `.heapprofile`, which never has them at all), `lines` says so in one line and falls back to
   `callees` - a fact about the profile, never an error.
+  Every row `lines` prints is SELF time only, never inclusive: a `.cpuprofile` node's `callFrame`
+  never carries the call site of its own invocation (only the callee's OWN definition position),
+  and `positionTicks` is a self-time-only count with no per-call-site breakdown at all - verified
+  against a real profile (a busy callee called from two different lines of its caller produced one
+  child node, not two, and that node's own `lineNumber` was the callee's definition line, not
+  either call site). So a line's inclusive time is not something this data can ever answer, not
+  merely something not yet computed here; `lines` says so in its own note and points at `callees`
+  for "where a line's time goes" instead of fabricating a number this format cannot support.
   `lines` ranks by self time: each row shows time, the line's share of the FUNCTION's own self time,
   its share of the profile total, and `path:line`; it also prints the line's own source text,
   trimmed to about 100 characters, when the named file is still readable on disk - the mapped
@@ -153,7 +212,10 @@ before it prints anything else for exactly that reason.
   function holds most of the self time, it suggests `callers` for that function. `do:` never
   targets a special frame - `(root)`, `(program)`, `(idle)`, `(garbage collector)` - since none of
   them is code a `callers`/`callees` command can drill into; it falls back to `top` when nothing
-  else qualifies.
+  else qualifies. `diff`'s own `do:` never names a row whose delta rounded to 0.000 - the exact
+  same row the displayed `functions`/`areas` lists already dropped for that reason (see `diff`'s
+  own JSON block below): choosing from the unrounded list would point at a function or area that
+  appears nowhere else in the same report.
 - Any prose that is not itself a runnable command - a caveat, a unit mismatch warning - goes on
   its own `note:` line, printed before `do:`, never inside `do:` itself: `do:` is always exactly
   one command an agent can pipe straight into a shell.
@@ -192,7 +254,13 @@ below also shares the top-level `unit` field described above.
 }
 ```
 (`note` is a heap-only field - JSON.stringify drops a `note`/`area` field entirely rather than
-writing it as `null` when there is none, matching every other command below with an optional field.)
+writing it as `null` when there is none, matching every other command below with an optional field.
+A `CallTreeNode` - here and in every tree below - also carries `recursive: true` when that node
+calls itself directly, and `depthCut: true` when the depth limit, not the children budget, is why
+it shows no children despite having real ones; both are omitted, never `false`, when they don't
+apply. `window: { "from": 0, "to": 5400 }` appears only when `--from`/`--to` was given - `total`
+above is then already the window's own total, and every `do:`/cut-hint command embeds the same
+`--from`/`--to` so a follow-up command never silently drops the window.)
 
 `finderscope top <profile> --json`:
 ```json
@@ -244,6 +312,9 @@ own `topDownCut` hint names, so a root "your code, top down" had to cut still sh
   "do": "finderscope callees '<profile>' 'compute src/util.js:4:2'"
 }
 ```
+(`callers`' own JSON carries the identical `recursive`/`children`/`childrenCut` shape - top-level
+`recursive: true` there means `<fn>` calls itself somewhere in its own ancestry, folded into the
+node that recurses rather than shown as a nested repeat of the same name.)
 
 `finderscope callees <profile> <fn> --paths --json` (same shape as `callers --paths`):
 ```json
@@ -266,12 +337,17 @@ the named file was still readable on disk):
     ...
   ],
   "cut": 0,
+  "note": "each row is self time only - V8's positionTicks never carries a call site, so a line that calls a hot function looks cold here; see where a line's time goes with the callees command",
   "do": "finderscope callees '<profile>' 'main src/main.js:10:3'"
 }
 ```
+`note` is always present on a successful `lines` result now, not only on the "no data" cases below
+- it states the self-time-only fact above, or, when `--from`/`--to` was given, that the per-line
+SPLIT is an estimate under a window (positionTicks has no timestamps of its own to filter by; only
+the total it is scaled by is windowed).
 When the profile carries no `positionTicks` at all, or none for this function, `lines`/`cut` are
-`[]`/`0` and a `note` field (a fact, never an error - see the tick-to-time rule above) replaces
-them:
+`[]`/`0` and a different `note` (a fact, never an error - see the tick-to-time rule above) replaces
+it:
 ```json
 { "metric": "time", "unit": "us", "function": "main src/main.js:10:3", "self": 4400, "total": 5400,
   "lines": [], "cut": 0,
@@ -293,21 +369,45 @@ each profile's own total changed):
 }
 ```
 
-`finderscope run --json [--heap] -- <command...>`:
+`finderscope run --json [--heap] [--heap-peak] -- <command...>`:
 ```json
 {
   "scratchDir": "/tmp/finderscope-xxxxxx",
   "profiles": [ /* one full summary object per profile written, largest total first */ ],
   "errors": [{ "profile": "<path>", "error": "<message>", "do": "<command>" }],
+  "heapSnapshots": [ "/tmp/finderscope-xxxxxx/Heap.....heapsnapshot" ],
   "do": "<the first profile's own do:, or a fallback>"
 }
 ```
+`heapSnapshots` is `[]` unless `--heap-peak` actually wrote one (see `run --heap-peak` above) -
+finderscope never reads this file itself. `heapPeakNote` appears only when `--heap-peak` was given
+but the command had no heap cap for it to work with. When the command crashes before it can write
+a normal profile but a heap snapshot near the limit WAS written, `do` (and `warning`) point at that
+snapshot directly, never at "rerun without sending it a signal" (nothing finderscope did sent one).
 When the command wrote no profile at all (it never ran node, or it ended via a forwarded signal
 before V8 could write one - see noProfileWarning()), `profiles` and `errors` are both `[]` and an
 extra `warning` field, a plain string explaining why, appears alongside `do`:
 ```json
-{ "scratchDir": "/tmp/finderscope-xxxxxx", "profiles": [], "errors": [], "warning": "<why>", "do": "<command>" }
+{ "scratchDir": "/tmp/finderscope-xxxxxx", "profiles": [], "errors": [], "heapSnapshots": [], "warning": "<why>", "do": "<command>" }
 ```
+
+`finderscope timeline <profile> --json`:
+```json
+{
+  "metric": "time", "unit": "us", "total": 5400,
+  "buckets": [
+    { "from": 0, "to": 270, "total": 270, "topOwn": { "key": "main src/main.js:10:3", "value": 200, "share": 0.741 } },
+    { "from": 270, "to": 540, "total": 0, "topOwn": undefined },
+    ...
+  ],
+  "do": "finderscope '<profile>' --from 0 --to 0.27"
+}
+```
+Always exactly 20 buckets, covering the WHOLE profile - never windowed, since the point of
+`timeline` is to let an agent pick a `--from`/`--to` window in the first place. `topOwn` is the
+bucket's own heaviest own function by self time; it is omitted (never `null`) when the bucket has
+no own self time at all. `do` points `--from`/`--to` at the heaviest bucket, in milliseconds
+(the unit `--from`/`--to` itself takes, not `unit` above).
 
 Every error - a bad flag, a malformed profile, an internal bug - is the same two-field shape under
 `--json`, whichever command raised it:
@@ -335,6 +435,18 @@ These are properties, tested with generated profiles:
   is at most that same function's own total; and every root is the first own key on every path
   counted under it - checked against an independent regrouping of the same profile's own
   per-sample stacks (test/helpers/oracle.ts), not against buildTopDown's own internal bookkeeping.
+- A direct self-call folds correctly: a node's `(self)` value plus the sum of its own direct
+  children's values still equals that node's own value, even when that node carries `recursive`.
+- A `--from`/`--to` window covering the profile's whole observed span (checked with a real, nonzero
+  profiler-startup gap before the first sample, the shape every real profile has) reports the same
+  total and the same per-function self time as no window at all; two adjacent, non-overlapping
+  windows that partition the span sum their own totals back to the whole; a window with no samples
+  in it reports a total of 0, not a division error.
+- `timeline`'s 20 buckets' own totals sum to exactly the profile's total, and each bucket's own
+  `from`/`to`, fed straight back as a `--from`/`--to` window, reproduces exactly that bucket's own
+  total - the same integer boundaries decide both.
+- `diff`'s `do:` never names a function or area whose own delta rounded to 0.000 - the same rule
+  the displayed `functions`/`areas` lists already apply to themselves.
 
 Exact text and JSON shape are covered by example tests on small fixture profiles.
 

@@ -18,7 +18,7 @@ test(
         const analysis = analyzeCpuProfile(profile, { root: "/project" });
         tc.assume(analysis.functions.size > 0);
         for (const fn of analysis.functions.values()) {
-          const resolved = resolveFunction(analysis, fn.key, "finderscope top 'p'");
+          const resolved = resolveFunction(analysis, fn.key, "finderscope top 'p'", "/project");
           assert.equal(resolved, fn);
         }
       },

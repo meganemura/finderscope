@@ -16,6 +16,11 @@ import { shQuote } from "./report/summary.js";
 
 export interface RunOptions {
   heap: boolean;
+  /** A transient heap PEAK (not what --heap already reports - memory still live at exit) needs a
+   *  heap snapshot taken near the moment the process actually approached its limit, which only
+   *  happens when the caller also capped the heap - see hasHeapCap()'s own comment on why this
+   *  never adds the flag otherwise. */
+  heapPeak: boolean;
   command: string[];
 }
 
@@ -29,6 +34,14 @@ export interface RunResult {
   scratchDir: string;
   /** Absolute paths, largest file first. */
   profiles: string[];
+  /** Absolute paths to any .heapsnapshot --heapsnapshot-near-heap-limit wrote into scratchDir
+   *  (--diagnostic-dir steers it there instead of its own default, the caller's cwd) - empty when
+   *  --heap-peak was not given, or was given but the command had no heap cap to make it fire. */
+  heapSnapshots: string[];
+  /** Set only when --heap-peak was given but the command had no heap cap (--max-old-space-size) -
+   *  a fact to report, not an error: without a cap, V8 never approaches a limit at all, so
+   *  --heapsnapshot-near-heap-limit would never trigger. */
+  heapPeakNote: string | undefined;
 }
 
 /** A caller mistake about the command itself - no command given, or the command does not exist -
@@ -62,10 +75,26 @@ function quoteForNodeOptions(value: string): string {
   return `"${value.replace(/"/g, '\\"')}"`;
 }
 
+// Every real spelling V8/Node accepts for a heap cap: the dash form, the underscore form (V8's own
+// flag parser treats `-`/`_` interchangeably in a flag name), and the newer --max-heap-size.
+const HEAP_CAP_PATTERN = /--max[-_]old[-_]space[-_]size(=|\s|$)|--max-heap-size(=|\s|$)/;
+
+/**
+ * True when the command's own argv, or the environment's existing NODE_OPTIONS, already caps the
+ * heap - the one condition `--heap-peak` requires before it adds --heapsnapshot-near-heap-limit at
+ * all: without a cap, V8 never approaches a heap LIMIT (it just grows to whatever the machine
+ * allows), so the flag would sit there and never fire - silently doing nothing is worse than a
+ * caller believing --heap-peak "did not work", so this is checked up front and reported as a note,
+ * never as a silent no-op.
+ */
+function hasHeapCap(command: string[], existingNodeOptions: string): boolean {
+  return command.some((arg) => HEAP_CAP_PATTERN.test(arg)) || HEAP_CAP_PATTERN.test(existingNodeOptions);
+}
+
 export function runCommand(options: RunOptions): Promise<RunResult> {
   return new Promise((resolvePromise, reject) => {
     if (options.command.length === 0) {
-      reject(new RunInputError("no command given after --", "finderscope run [--heap] -- '<command...>'"));
+      reject(new RunInputError("no command given after --", "finderscope run [--heap] [--heap-peak] -- '<command...>'"));
       return;
     }
 
@@ -73,6 +102,20 @@ export function runCommand(options: RunOptions): Promise<RunResult> {
     const existingNodeOptions = process.env["NODE_OPTIONS"] ?? "";
     const flags = [`--cpu-prof`, `--cpu-prof-dir=${quoteForNodeOptions(scratchDir)}`];
     if (options.heap) flags.push(`--heap-prof`, `--heap-prof-dir=${quoteForNodeOptions(scratchDir)}`);
+    const capped = hasHeapCap(options.command, existingNodeOptions);
+    let heapPeakNote: string | undefined;
+    if (options.heapPeak) {
+      if (capped) {
+        // --diagnostic-dir steers the snapshot into the SAME scratch dir every other profile
+        // already lands in - its own default (the current directory) is not that, and a real
+        // heap snapshot can be well over 100MB, not something to leave wherever the command
+        // happened to be run from.
+        flags.push(`--heapsnapshot-near-heap-limit=1`, `--diagnostic-dir=${quoteForNodeOptions(scratchDir)}`);
+      } else {
+        heapPeakNote =
+          "--heap-peak had no --max-old-space-size to work with, so it added nothing - a heap snapshot near the limit needs a limit to be near; pass --max-old-space-size to the profiled command too";
+      }
+    }
     // Append, never replace: a caller (or its own environment) may already rely on NODE_OPTIONS
     // for something unrelated.
     const nodeOptions = [existingNodeOptions, ...flags].filter((s) => s.length > 0).join(" ");
@@ -107,11 +150,13 @@ export function runCommand(options: RunOptions): Promise<RunResult> {
     child.on("exit", (code, signal) => {
       stopForwarding();
       const exitCode = exitCodeFor(code, signal);
-      const profiles = readdirSync(scratchDir)
+      const written = readdirSync(scratchDir);
+      const profiles = written
         .filter((f) => f.endsWith(".cpuprofile") || f.endsWith(".heapprofile"))
         .map((f) => join(scratchDir, f))
         .sort((a, b) => statSync(b).size - statSync(a).size);
-      resolvePromise({ exitCode, signal, scratchDir, profiles });
+      const heapSnapshots = written.filter((f) => f.endsWith(".heapsnapshot")).map((f) => join(scratchDir, f));
+      resolvePromise({ exitCode, signal, scratchDir, profiles, heapSnapshots, heapPeakNote });
     });
   });
 }

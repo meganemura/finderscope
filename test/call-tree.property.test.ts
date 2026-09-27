@@ -8,11 +8,25 @@ import { test } from "vitest";
 import assert from "node:assert/strict";
 import * as hegel from "@hegeldev/hegel";
 import { parseCpuProfile } from "../src/profile/cpu.js";
-import { analyzeCpuProfile, buildCallTree, buildTopDown, type CallTreeNode } from "../src/model.js";
+import { analyzeCpuProfile, buildCallTree, buildTopDown, type CallTreeNode, type ProfileAnalysis } from "../src/model.js";
 import { drawCpuProfileJson } from "./helpers/profile-gen.js";
 
 const UNCUT = { depth: 50, childrenPerLevel: 10_000, expand: true };
 const UNCUT_TOP_DOWN = { ...UNCUT, rootCount: 10_000 };
+
+/**
+ * True when `key` calls itself DIRECTLY (adjacent in a path's own key chain) on some real
+ * (positive-value) path anywhere in the profile - checked against analysis.paths, the raw
+ * per-sample chains, independent of buildCallTree's own folding logic, so this cannot pass merely
+ * by re-deriving the same computation it is meant to check. Only meaningful for a function's own
+ * TOP-level "down" tree, where the chains cover every occurrence of `key` in the whole profile
+ * (buildCallTree's own comment on why it uses the FIRST occurrence, not a later one) - a nested
+ * node deeper in someone else's tree is scoped to the paths that reach it through that specific
+ * ancestor, which this whole-profile check does not model.
+ */
+function hasDirectSelfCall(analysis: ProfileAnalysis, key: string): boolean {
+  return analysis.paths.some((p) => p.value > 0 && p.keys.some((k, i) => k === key && p.keys[i + 1] === key));
+}
 
 function checkInvariant(nodes: CallTreeNode[], parentValue: number, label: string): void {
   const sum = nodes.reduce((s, n) => s + n.value, 0);
@@ -37,6 +51,7 @@ test(
           const tree = buildCallTree(analysis, fn, "down", UNCUT);
           assert.equal(tree.childrenCut, 0);
           checkInvariant(tree.children, fn.total, fn.key);
+          assert.equal(tree.recursive, hasDirectSelfCall(analysis, fn.key), `${fn.key}: recursive flag disagrees with a direct self-call actually existing`);
         }
       },
       { testCases: 100 },

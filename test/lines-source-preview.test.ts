@@ -55,7 +55,7 @@ test(
     try {
       execFileSync("mkfifo", [fifoPath]);
       const data = analyzeMappedLineProfile(dir, fifoPath);
-      assert.equal(data.note, undefined);
+      assert.doesNotMatch(data.note ?? "", /no positionTicks/);
       assert.equal(data.lines.length, 1);
       assert.equal(data.lines[0]!.source, undefined, "expected no preview from a FIFO, and no hang reading it");
     } finally {
@@ -71,7 +71,7 @@ test("a source map naming a file with no code extension gives no preview", () =>
   try {
     writeFileSync(secretPath, "-----BEGIN OPENSSH PRIVATE KEY-----\nnot a real key, just a test fixture\n");
     const data = analyzeMappedLineProfile(dir, secretPath);
-    assert.equal(data.note, undefined);
+    assert.doesNotMatch(data.note ?? "", /no positionTicks/);
     assert.equal(data.lines.length, 1);
     assert.equal(data.lines[0]!.source, undefined, "expected no preview from a non-code extension");
   } finally {

@@ -48,6 +48,29 @@ export interface NormalizedCpuProfile {
   sampleTimes: number[];
   /** Sum of sampleTimes, not endTime - startTime, so it agrees with sum(self) exactly. */
   totalDuration: number;
+  /**
+   * Microseconds from the profile's own start to the moment sample i was captured - the running
+   * sum of timeDeltas[0..i] inclusive, same length and order as `samples`. This is deliberately
+   * NOT derived from sampleTimes (which replaces the missing trailing delta with a median for the
+   * LAST sample only): sampleStarts[i] is every sample's own real capture offset, exact regardless
+   * of that substitution, which is what `--from`/`--to` windowing (model.ts's AnalyzeOptions) and
+   * `timeline` bucket assignment need - a sample's OWN position in time, not a reconstructed
+   * duration.
+   */
+  sampleStarts: number[];
+  /**
+   * The profile's own observed time span: [spanStart, spanEnd) - spanStart is the first sample's
+   * own start offset (sampleStarts[0], which already excludes timeDeltas[0], the profiler-startup
+   * gap before any sample exists), and spanEnd is the last sample's own start offset plus its own
+   * time. `--from`/`--to` windowing and `timeline` bucketing (model.ts) both measure against THIS
+   * span, never against absolute-zero: sampleStarts[0] is not 0 in a real profile (there is always
+   * a nonzero gap before the first sample), so bucketing samples by their absolute sampleStarts
+   * value against a width computed from spanEnd - spanStart (which excludes that gap) put every
+   * sample's own position past where a naive [0, spanEnd - spanStart) range expected it, piling
+   * the tail of the profile into the last bucket. Zero for an empty profile (no samples at all).
+   */
+  spanStart: number;
+  spanEnd: number;
 }
 
 interface RawCallFrame {
@@ -230,5 +253,15 @@ export function parseCpuProfile(json: unknown): NormalizedCpuProfile {
 
   const totalDuration = sampleTimes.reduce((a, b) => a + b, 0);
 
-  return { kind: "cpu", nodes, rootId, samples: samples as number[], sampleTimes, totalDuration };
+  const sampleStarts: number[] = new Array(samples.length).fill(0);
+  let running = 0;
+  for (let i = 0; i < samples.length; i++) {
+    running += deltas[i] ?? 0;
+    sampleStarts[i] = running;
+  }
+
+  const spanStart = sampleStarts.length > 0 ? sampleStarts[0]! : 0;
+  const spanEnd = sampleStarts.length > 0 ? sampleStarts[sampleStarts.length - 1]! + sampleTimes[sampleTimes.length - 1]! : 0;
+
+  return { kind: "cpu", nodes, rootId, samples: samples as number[], sampleTimes, totalDuration, sampleStarts, spanStart, spanEnd };
 }

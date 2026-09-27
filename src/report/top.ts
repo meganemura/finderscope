@@ -43,11 +43,11 @@ export interface TopData {
  *  time actually goes. Never a special frame (root/program/idle/gc) - there is no code there to
  *  drill into. An empty list (an --area filter that matched nothing, or nothing left once special
  *  frames are skipped) falls back to the plain top list. */
-function chooseDo(sortedEntries: TopEntry[], by: TopBy, profilePath: string): string {
+function chooseDo(sortedEntries: TopEntry[], by: TopBy, profilePath: string, windowArgs: string): string {
   const heaviest = sortedEntries.find((e) => !isSpecialFrame(e.key));
-  if (heaviest === undefined) return `finderscope top ${shQuote(profilePath)}`;
+  if (heaviest === undefined) return `finderscope top ${shQuote(profilePath)}${windowArgs}`;
   const verb = by === "self" ? "callers" : "callees";
-  return `finderscope ${verb} ${shQuote(profilePath)} ${shQuote(heaviest.key)}`;
+  return `finderscope ${verb} ${shQuote(profilePath)} ${shQuote(heaviest.key)}${windowArgs}`;
 }
 
 /**
@@ -69,7 +69,7 @@ function rootEntries(analysis: ProfileAnalysis): TopEntry[] {
   return roots.map((r) => ({ key: r.key, area: "own", value: r.value, share: share(r.value) }));
 }
 
-export function buildTop(analysis: ProfileAnalysis, profilePath: string, options: TopOptions): TopData {
+export function buildTop(analysis: ProfileAnalysis, profilePath: string, options: TopOptions, windowArgs = ""): TopData {
   const by = options.by ?? "self";
   const n = options.n ?? DEFAULT_COUNT;
   const total = analysis.total;
@@ -113,11 +113,11 @@ export function buildTop(analysis: ProfileAnalysis, profilePath: string, options
     total,
     entries,
     cut: Math.max(0, nonZeroEntries.length - n),
-    do: chooseDo(nonZeroEntries, by, profilePath),
+    do: chooseDo(nonZeroEntries, by, profilePath, windowArgs),
   };
 }
 
-export function formatTopText(data: TopData, profilePath: string): string {
+export function formatTopText(data: TopData, profilePath: string, windowArgs = ""): string {
   const areaSuffix = data.area !== undefined ? ` --area ${data.area}` : "";
   const lines: string[] = [
     `profile: ${profilePath}`,
@@ -130,7 +130,7 @@ export function formatTopText(data: TopData, profilePath: string): string {
   }
   if (data.cut > 0) {
     const shown = data.entries.length + data.cut;
-    lines.push(`  … ${data.cut} more (finderscope top ${shQuote(profilePath)}${areaSuffix} --by ${data.by} -n ${shown})`);
+    lines.push(`  … ${data.cut} more (finderscope top ${shQuote(profilePath)}${areaSuffix} --by ${data.by} -n ${shown}${windowArgs})`);
   }
   lines.push("");
   lines.push(`do: ${data.do}`);

@@ -73,11 +73,28 @@ export interface ProfileAnalysis {
   lineReadPaths: Map<string, { path: string; line: number }>;
 }
 
+/** Microseconds, half-open [from, to) - a sample counts when its own start offset
+ *  (NormalizedCpuProfile.sampleStarts) falls in this range. Heap profiles carry no timestamps at
+ *  all, so analyzeHeapProfile has no window parameter - rejecting --from/--to on a heap profile is
+ *  cli.ts's job, before an analysis is ever attempted. */
+export interface TimeWindow {
+  from: number;
+  to: number;
+}
+
 export interface AnalyzeOptions {
   /** Shortens an "own" frame's printed path when the frame is under it. Does not decide whether a
    *  frame is "own" - see classifyPath()'s own comment. */
   root: string;
   hottestPathCount?: number;
+  /** cpu profile only - restricts every self/total/area/line number in the resulting
+   *  ProfileAnalysis to samples captured inside this window; `total` becomes the window's own
+   *  total, not the whole profile's, so every share in the result is relative to the window.
+   *  Omitted entirely (not { from: 0, to: Infinity }) for "no window given at all" to reach this
+   *  option, so a window covering the exact whole profile and no window given are never forced
+   *  through the same filtering pass, keeping the "no window == full profile" property exact
+   *  rather than dependent on a boundary matching exactly. */
+  window?: TimeWindow;
 }
 
 // Special V8 frames are areas in their own right, not code - "(root)" is V8's synthetic tree
@@ -395,7 +412,7 @@ function computeLineSelfTimes(
   if (perFunction.size > 0) lineSelfTimes.set(own.key, perFunction);
 }
 
-function buildNodeInfo(nodes: Map<number, GenericNode>, projectRoot: string, mapper: SourceMapper): Map<number, ClassifyResult> {
+export function buildNodeInfo(nodes: Map<number, GenericNode>, projectRoot: string, mapper: SourceMapper): Map<number, ClassifyResult> {
   const info = new Map<number, ClassifyResult>();
   for (const [id, node] of nodes) info.set(id, classify(node, projectRoot, mapper));
   return info;
@@ -582,6 +599,22 @@ export interface CallTreeNode {
    *  own comment. */
   children: CallTreeNode[];
   childrenCut: number;
+  /** True only when this node calls itself directly (A -> A, not A -> B -> A) somewhere beneath
+   *  it: every such direct self-call is folded into THIS node instead of nested one level per
+   *  recursion depth - its self time joins this node's own `(self)`, and its own further callees
+   *  merge into this node's `children` by key - so the tree shows the recursive function once,
+   *  with its own real total, rather than a deep chain of "the same name calling itself" that told
+   *  an agent nothing beyond "yes, it recurses". Omitted (never `false`) when there is no direct
+   *  self-call, matching this codebase's optional-field convention for JSON. */
+  recursive?: true;
+  /** True only when this node's own subtree was cut off by the DEPTH limit rather than the
+   *  per-level children budget (`childrenCut`) - it has real children below (nonzero value) that
+   *  this tree never descended into at all, as opposed to a non-own subtree collapsed on purpose
+   *  (see buildCallTreeLevel's own comment) or a sibling list merely longer than childrenPerLevel.
+   *  Without this, a node truncated by depth looks exactly like a real leaf - no children, no cut
+   *  count - and an agent has no sign there is more to see. Omitted (never `false`) for the same
+   *  reason `recursive` is. */
+  depthCut?: true;
 }
 
 export interface CallTreeOptions {
@@ -593,6 +626,28 @@ export interface CallTreeOptions {
 interface Chain {
   keys: string[];
   value: number;
+}
+
+/**
+ * Strips every LEADING occurrence of `selfKey` from a chain's own keys, repeatedly - a direct
+ * self-call (A calls A) shows up on a sample's path as `selfKey` immediately following itself, one
+ * entry per recursion depth; stripping only the head (never a later reappearance after some other
+ * frame) is exactly "direct recursion only" - a chain `[A, B, A]` (A -> B -> A, mediated recursion)
+ * keeps its second A untouched, since it is not adjacent to the first. `recursive` is true when
+ * any chain actually had something stripped, which is what the caller attaches to the owning
+ * node's own `recursive` marker.
+ */
+function foldDirectRecursion(chains: Chain[], selfKey: string): { chains: Chain[]; recursive: boolean } {
+  let recursive = false;
+  const folded = chains.map((chain) => {
+    let keys = chain.keys;
+    while (keys.length > 0 && keys[0] === selfKey) {
+      keys = keys.slice(1);
+      recursive = true;
+    }
+    return { keys, value: chain.value };
+  });
+  return { chains: folded, recursive };
 }
 
 function groupChainsByFirstKey(chains: Chain[]): Map<string, { value: number; rest: Chain[] }> {
@@ -622,16 +677,32 @@ function groupChainsByFirstKey(chains: Chain[]): Map<string, { value: number; re
  * of what came after), so the number is correct even though the breakdown is not shown - `expand`
  * lifts that stop so package internals expand exactly like own code would.
  */
-function buildCallTreeLevel(chains: Chain[], areaOf: (key: string) => string, total: number, depthRemaining: number, options: Required<CallTreeOptions> & { includeSelf: boolean }): { nodes: CallTreeNode[]; cut: number } {
+/**
+ * `selfKey` is the key of the node these `chains` are children OF - the fn itself for the top
+ * call, or a specific child's own key one level further down (see the recursive call below). Every
+ * chain is folded against it first (foldDirectRecursion) so a function's own direct recursion never
+ * shows up as "a child of itself" at all - its self time and its own further callees merge
+ * straight into THIS level, and `recursive` (returned) describes the OWNER (selfKey), not any of
+ * the children this level returns - the caller attaches it to that owner's own CallTreeNode.
+ */
+function buildCallTreeLevel(
+  chains: Chain[],
+  areaOf: (key: string) => string,
+  total: number,
+  depthRemaining: number,
+  selfKey: string,
+  options: Required<CallTreeOptions> & { includeSelf: boolean },
+): { nodes: CallTreeNode[]; cut: number; recursive: boolean } {
   const share = (value: number): number => (total > 0 ? value / total : 0);
-  const groups = groupChainsByFirstKey(chains);
+  const { chains: folded, recursive } = foldDirectRecursion(chains, selfKey);
+  const groups = groupChainsByFirstKey(folded);
   const entries = [...groups.entries()].sort((a, b) => b[1].value - a[1].value);
   const shown = entries.slice(0, options.childrenPerLevel);
   const cut = Math.max(0, entries.length - options.childrenPerLevel);
 
   const nodes: CallTreeNode[] = [];
   if (options.includeSelf) {
-    const selfValue = chains.filter((c) => c.value > 0 && c.keys.length === 0).reduce((sum, c) => sum + c.value, 0);
+    const selfValue = folded.filter((c) => c.value > 0 && c.keys.length === 0).reduce((sum, c) => sum + c.value, 0);
     // Omitted when zero, not printed as a "0.0ms 0.0%" row: a node whose every chain kept going
     // past it has nothing of its own to show, and the invariant checked in
     // test/call-tree.property.test.ts (children incl. self sum to the parent's value) holds
@@ -643,10 +714,21 @@ function buildCallTreeLevel(chains: Chain[], areaOf: (key: string) => string, to
   for (const [key, group] of shown) {
     const area = areaOf(key);
     const expandable = area === "own" || options.expand;
-    const sub = expandable && depthRemaining > 1 ? buildCallTreeLevel(group.rest, areaOf, total, depthRemaining - 1, options) : { nodes: [], cut: 0 };
-    nodes.push({ key, area, value: group.value, share: share(group.value), isSelf: false, children: sub.nodes, childrenCut: sub.cut });
+    const hasDeeper = group.rest.some((c) => c.value > 0 && c.keys.length > 0);
+    const descend = expandable && depthRemaining > 1;
+    const sub = descend
+      ? buildCallTreeLevel(group.rest, areaOf, total, depthRemaining - 1, key, options)
+      : { nodes: [], cut: 0, recursive: false };
+    const node: CallTreeNode = { key, area, value: group.value, share: share(group.value), isSelf: false, children: sub.nodes, childrenCut: sub.cut };
+    if (sub.recursive) node.recursive = true;
+    // Only a real, would-be-expandable node that stopped for lack of depth (not one already
+    // deliberately collapsed because it is a non-own, non-expanded subtree - that collapse is
+    // documented as such by its own line, not a truncation) gets this marker, and only when
+    // something with real value actually sits below it.
+    if (expandable && !descend && hasDeeper) node.depthCut = true;
+    nodes.push(node);
   }
-  return { nodes, cut };
+  return { nodes, cut, recursive };
 }
 
 /**
@@ -657,7 +739,12 @@ function buildCallTreeLevel(chains: Chain[], areaOf: (key: string) => string, to
  * matching path's prefix in reverse (fn's immediate caller first, then its caller's caller, ...);
  * "up" has no "(self)" row - self time is a property of `fn` alone, not of who called it.
  */
-export function buildCallTree(analysis: ProfileAnalysis, fn: AnalyzedFunction, direction: "down" | "up", options: CallTreeOptions = {}): { children: CallTreeNode[]; childrenCut: number } {
+export function buildCallTree(
+  analysis: ProfileAnalysis,
+  fn: AnalyzedFunction,
+  direction: "down" | "up",
+  options: CallTreeOptions = {},
+): { children: CallTreeNode[]; childrenCut: number; recursive: boolean } {
   const resolved = { depth: options.depth ?? 2, expand: options.expand ?? false, childrenPerLevel: options.childrenPerLevel ?? 10 };
   const areaOf = (key: string): string => analysis.functions.get(key)?.area ?? "unknown";
 
@@ -671,8 +758,8 @@ export function buildCallTree(analysis: ProfileAnalysis, fn: AnalyzedFunction, d
     chains.push({ keys, value: path.value });
   }
 
-  const level = buildCallTreeLevel(chains, areaOf, fn.total, resolved.depth, { ...resolved, includeSelf: direction === "down" });
-  return { children: level.nodes, childrenCut: level.cut };
+  const level = buildCallTreeLevel(chains, areaOf, fn.total, resolved.depth, fn.key, { ...resolved, includeSelf: direction === "down" });
+  return { children: level.nodes, childrenCut: level.cut, recursive: level.recursive };
 }
 
 export interface TopDownOptions {
@@ -728,8 +815,10 @@ export function buildTopDown(analysis: ProfileAnalysis, options: TopDownOptions 
   const rootsCut = Math.max(0, rootTotals.length - rootCount);
 
   const roots: CallTreeNode[] = shown.map(({ key, value, chains }) => {
-    const level = buildCallTreeLevel(chains, areaOf, total, depth, { depth, expand, childrenPerLevel, includeSelf: true });
-    return { key, area: "own", value, share: share(value), isSelf: false, children: level.nodes, childrenCut: level.cut };
+    const level = buildCallTreeLevel(chains, areaOf, total, depth, key, { depth, expand, childrenPerLevel, includeSelf: true });
+    const root: CallTreeNode = { key, area: "own", value, share: share(value), isSelf: false, children: level.nodes, childrenCut: level.cut };
+    if (level.recursive) root.recursive = true;
+    return root;
   });
 
   return { roots, rootsCut };
@@ -803,11 +892,24 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
  * most once per distinct node, never once per sample. Holding one number per sample (rather than
  * one running total per node) was the actual memory problem on a multi-million-sample profile.
  */
-function aggregateSampleTimeByNode(profile: NormalizedCpuProfile): { nodeId: number; value: number }[] {
+/**
+ * A sample's own position WITHIN the profile's observed span - see NormalizedCpuProfile's own
+ * comment on spanStart/spanEnd for why this, and not the raw sampleStarts value, is the one
+ * coordinate `--from`/`--to` and `timeline` both measure against.
+ */
+function samplePosition(profile: NormalizedCpuProfile, i: number): number {
+  return profile.sampleStarts[i]! - profile.spanStart;
+}
+
+function aggregateSampleTimeByNode(profile: NormalizedCpuProfile, window: TimeWindow | undefined): { nodeId: number; value: number }[] {
   const totals = new Map<number, number>();
   for (let i = 0; i < profile.samples.length; i++) {
     const time = profile.sampleTimes[i]!;
     if (time <= 0) continue;
+    if (window !== undefined) {
+      const pos = samplePosition(profile, i);
+      if (pos < window.from || pos >= window.to) continue;
+    }
     const nodeId = profile.samples[i]!;
     totals.set(nodeId, (totals.get(nodeId) ?? 0) + time);
   }
@@ -815,11 +917,16 @@ function aggregateSampleTimeByNode(profile: NormalizedCpuProfile): { nodeId: num
 }
 
 export function analyzeCpuProfile(profile: NormalizedCpuProfile, options: AnalyzeOptions): ProfileAnalysis {
-  const contributions = aggregateSampleTimeByNode(profile);
+  const contributions = aggregateSampleTimeByNode(profile, options.window);
+  // Windowed: the window's own total (sum of the samples it kept), not the whole profile's - every
+  // share in the result is then relative to the window. Unwindowed: profile.totalDuration exactly
+  // (not a re-sum of contributions, which would be the same number computed a second, redundant
+  // way).
+  const total = options.window !== undefined ? contributions.reduce((s, c) => s + c.value, 0) : profile.totalDuration;
   return analyzeCore({
     nodes: profile.nodes,
     metric: "time",
-    total: profile.totalDuration,
+    total,
     contributions,
     root: options.root,
     hottestPathCount: options.hottestPathCount ?? 3,
@@ -838,4 +945,92 @@ export function analyzeHeapProfile(profile: NormalizedHeapProfile, options: Anal
     root: options.root,
     hottestPathCount: options.hottestPathCount ?? 3,
   });
+}
+
+export interface TimelineBucket {
+  from: number;
+  to: number;
+  /** Sum of every sample's time in this bucket, any area - the denominator an agent needs to see
+   *  how much of the bucket the top own function actually accounts for. */
+  total: number;
+  /** The heaviest own function by self time inside this bucket - undefined when this bucket has
+   *  no own self time at all (idle, bootstrap, or a bucket entirely inside a dependency call). */
+  topOwn: { key: string; value: number; share: number } | undefined;
+}
+
+const TIMELINE_BUCKET_COUNT = 20;
+
+/**
+ * `count + 1` integer boundaries over `[0, span]` - `boundaries[k]` is bucket k's own `from`, and
+ * `boundaries[k + 1]` its own `to`. Every boundary is `Math.floor(k * span / count)`, the same
+ * formula for every k including `k === count` (which floors to exactly `span`, no separate branch
+ * needed for the last bucket's own upper bound) - a single shared, monotonic, all-integer formula,
+ * so a bucket's own printed `from`/`to` and bucketIndexForPosition()'s assignment below can never
+ * disagree with each other the way two independently-rounded floating computations could.
+ */
+function computeSpanBoundaries(span: number, count: number): number[] {
+  const boundaries: number[] = [];
+  for (let k = 0; k <= count; k++) boundaries.push(Math.floor((k * span) / count));
+  return boundaries;
+}
+
+/** The bucket index k such that `boundaries[k] <= pos < boundaries[k + 1]` - a linear scan over
+ *  `count` (20) boundaries per sample, not a division: computeSpanBoundaries' own floor formula is
+ *  not exactly invertible by a single division without risking the same floating disagreement this
+ *  whole scheme exists to avoid. */
+function bucketIndexForPosition(pos: number, boundaries: number[]): number {
+  const count = boundaries.length - 1;
+  let k = 0;
+  while (k < count - 1 && pos >= boundaries[k + 1]!) k++;
+  return k;
+}
+
+/**
+ * 20 equal-width time buckets across the WHOLE profile (never windowed - the point of `timeline`
+ * is to let an agent pick a window in the first place), each with the top own function by self
+ * time. Bucketed against the profile's own SPAN (spanEnd - spanStart), positioned by
+ * samplePosition() - not against the raw sampleStarts value: sampleStarts[0] is never 0 in a real
+ * profile (there is always a nonzero gap, timeDeltas[0], before the first sample even exists), so
+ * bucketing by the raw value against a width computed from the span (which excludes that gap) put
+ * every sample's own position further along than the width expected, piling the back half of the
+ * profile into the last bucket. `from`/`to` on each bucket are offsets from spanStart, the same
+ * coordinate `--from`/`--to` measure in (samplePosition()) - a bucket's own `to` is always a
+ * window an agent can hand straight back to `--from`/`--to` and get exactly that bucket's own
+ * total back, because the boundaries used to print it are the exact same integers used to assign
+ * samples to it in the first place.
+ */
+export function buildTimeline(profile: NormalizedCpuProfile, root: string): TimelineBucket[] {
+  const mapper = createSourceMapper();
+  const info = buildNodeInfo(profile.nodes, root, mapper);
+  const span = profile.spanEnd - profile.spanStart;
+  const boundaries = computeSpanBoundaries(span, TIMELINE_BUCKET_COUNT);
+
+  const bucketTotals = new Array<number>(TIMELINE_BUCKET_COUNT).fill(0);
+  const bucketOwnSelf: Map<string, number>[] = Array.from({ length: TIMELINE_BUCKET_COUNT }, () => new Map<string, number>());
+
+  for (let i = 0; i < profile.samples.length; i++) {
+    const time = profile.sampleTimes[i]!;
+    if (time <= 0) continue;
+    const bucketIndex = bucketIndexForPosition(samplePosition(profile, i), boundaries);
+    bucketTotals[bucketIndex] = bucketTotals[bucketIndex]! + time;
+    const nodeId = profile.samples[i]!;
+    const classified = info.get(nodeId)!;
+    if (classified.area !== "own") continue;
+    const perFunction = bucketOwnSelf[bucketIndex]!;
+    perFunction.set(classified.key, (perFunction.get(classified.key) ?? 0) + time);
+  }
+
+  const buckets: TimelineBucket[] = [];
+  for (let k = 0; k < TIMELINE_BUCKET_COUNT; k++) {
+    const bucketTotal = bucketTotals[k]!;
+    const entries = [...bucketOwnSelf[k]!.entries()].sort((a, b) => b[1] - a[1]);
+    const top = entries[0];
+    buckets.push({
+      from: boundaries[k]!,
+      to: boundaries[k + 1]!,
+      total: bucketTotal,
+      topOwn: top === undefined ? undefined : { key: top[0], value: top[1], share: bucketTotal > 0 ? top[1] / bucketTotal : 0 },
+    });
+  }
+  return buckets;
 }

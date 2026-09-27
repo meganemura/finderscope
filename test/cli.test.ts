@@ -523,6 +523,99 @@ describe("finderscope lines", () => {
   });
 });
 
+describe("--help", () => {
+  test("finderscope --help prints one screen and a runnable do:, without reading a profile", async () => {
+    const { io, out } = capture();
+    const code = await main(["--help"], io);
+    assert.equal(code, 0);
+    assert.match(out.join(""), /finderscope top /);
+    assert.match(out.join(""), /finderscope timeline /);
+    assert.match(out.join(""), /\ndo: finderscope run -- node/);
+  });
+
+  test("finderscope -h and finderscope help print the same screen", async () => {
+    const a = capture();
+    await main(["-h"], a.io);
+    const b = capture();
+    await main(["help"], b.io);
+    assert.equal(a.out.join(""), b.out.join(""));
+  });
+
+  test("finderscope lines --help prints only that command's usage, with no profile required", async () => {
+    const { io, out } = capture();
+    const code = await main(["lines", "--help"], io);
+    assert.equal(code, 0);
+    assert.match(out.join(""), /^finderscope lines /);
+    assert.doesNotMatch(out.join(""), /finderscope callees /);
+  });
+
+  test("run -- node -h passes -h to the profiled command, not to finderscope's own help", async () => {
+    const { io, out } = capture();
+    const code = await main(["run", "--", process.execPath, "-h"], io);
+    assert.equal(code, 0);
+    assert.doesNotMatch(out.join(""), /^finderscope run /);
+  });
+});
+
+describe("finderscope timeline", () => {
+  test("text and json both end with a runnable do:, with 20 buckets", async () => {
+    const text = capture();
+    const code = await main(["timeline", CPU_FIXTURE, ...ROOT], text.io);
+    assert.equal(code, 0);
+    assert.match(text.out.join(""), /\ndo: finderscope /);
+
+    const json = capture();
+    await main(["timeline", CPU_FIXTURE, ...ROOT, "--json"], json.io);
+    const data = JSON.parse(json.out.join(""));
+    assert.equal(data.unit, "us");
+    assert.equal(data.buckets.length, 20);
+  });
+
+  test("timeline on a heap profile is a caller error, not a finderscope bug", async () => {
+    const { io, out } = capture();
+    const code = await main(["timeline", HEAP_FIXTURE, ...ROOT], io);
+    assert.equal(code, 1);
+    assert.match(out.join(""), /has no timestamps/);
+  });
+});
+
+describe("--from/--to windowing", () => {
+  test("summary prints the window it used, and every do:/cut-hint carries the same --from/--to", async () => {
+    const { io, out } = capture();
+    const code = await main([CPU_FIXTURE, ...ROOT, "--from", "0", "--to", "10"], io);
+    assert.equal(code, 0);
+    assert.match(out.join(""), /^window: /m);
+    assert.match(out.join(""), /--from 0 --to 10/);
+
+    const json = capture();
+    await main([CPU_FIXTURE, ...ROOT, "--from", "0", "--to", "10", "--json"], json.io);
+    const data = JSON.parse(json.out.join(""));
+    assert.deepEqual(data.window, { from: 0, to: 10000 });
+    assert.match(data.do, /--from 0 --to 10$/);
+  });
+
+  test("top/callers/callees/lines all accept --from/--to and carry it into their own do:", async () => {
+    const top = capture();
+    await main(["top", CPU_FIXTURE, ...ROOT, "--from", "0", "--to", "10"], top.io);
+    assert.match(top.out.join(""), /--from 0 --to 10/);
+
+    const callees = capture();
+    await main(["callees", CPU_FIXTURE, "main", ...ROOT, "--from", "0", "--to", "10"], callees.io);
+    assert.match(callees.out.join(""), /--from 0 --to 10/);
+
+    const lines = capture();
+    await main(["lines", LINES_FIXTURE, "main", ...ROOT, "--from", "0", "--to", "10"], lines.io);
+    assert.match(lines.out.join(""), /windowed: positionTicks has no timestamps/);
+  });
+
+  test("--from without --to is a caller error with its own do:", async () => {
+    const { io, out } = capture();
+    const code = await main([CPU_FIXTURE, ...ROOT, "--from", "0"], io);
+    assert.equal(code, 1);
+    assert.match(out.join(""), /--from and --to must be given together/);
+  });
+});
+
 // This describe block runs last (vitest runs a file's own tests in declaration order), after
 // every test above has pushed its own stdout into allOutputs - so by the time this runs, it has
 // every `do:` line AND every "… N more" cut-hint command this whole file produced, text and JSON

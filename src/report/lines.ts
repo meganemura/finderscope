@@ -62,7 +62,7 @@ export interface LinesData {
   lines: LineEntry[];
   cut: number;
   /** Set, with `lines`/`cut` left empty/0, when this profile or this function has no positionTicks
-   *  data at all - design.md decision 2: this is a fact about the profile, never an error. */
+   *  data at all - a fact about the profile, never an error. */
   note: string | undefined;
   /** The next command to run, without the leading "do: ". */
   do: string;
@@ -71,18 +71,32 @@ export interface LinesData {
 const NO_POSITION_TICKS_AT_ALL =
   "this profile has no positionTicks at all - an older Node build, or a .heapprofile, never carries per-line tick data";
 const NO_POSITION_TICKS_FOR_FUNCTION = "this function has no positionTicks in this profile";
+// Verified against a real recursive-call profile: V8's callFrame never carries a call site (only
+// a callee's own definition position), and positionTicks is a self-time count with no inclusive
+// counterpart - so a line's inclusive time is never derivable from a .cpuprofile at all, not
+// merely unimplemented here. Every successful `lines` row carries only self time; this note says
+// so and points at the one command that does show inclusive time.
+const SELF_TIME_ONLY_NOTE =
+  "each row is self time only - V8's positionTicks never carries a call site, so a line that calls a hot function looks cold here; see where a line's time goes with the callees command";
+// positionTicks is one fixed array per node for the WHOLE profile - a window can only scale it by
+// this function's windowed self time, using the whole profile's own per-line ratios, since there
+// is no way to know which window a V8 tick actually fell in. The per-line split below is an
+// ESTIMATE under a window, not a fact the way the unwindowed numbers are - stated here instead of
+// silently presented as equally exact.
+const WINDOWED_ESTIMATE_NOTE =
+  "windowed: positionTicks has no timestamps, so each line's share is estimated from the whole profile's own per-line ratios, not counted specifically inside this window";
 
 /**
- * design.md decision 1's own `do:` rule: when this function's self time is a small share of the
- * profile, its OWN lines are not the interesting question yet - point at `callees`, where its time
- * actually goes. Otherwise this function's own code is a real hot spot, so the natural next step
- * is the SAME question about the next heaviest own function, not a different verb - `lines` again.
+ * The `do:` rule: when this function's self time is a small share of the profile, its OWN lines
+ * are not the interesting question yet - point at `callees`, where its time actually goes.
+ * Otherwise this function's own code is a real hot spot, so the natural next step is the SAME
+ * question about the next heaviest own function, not a different verb - `lines` again.
  * Falls back to `callees` on `fn` itself when there is no other own function left to ask about,
  * the same "nothing else qualifies" fallback every other report's chooseDo uses.
  */
-function chooseDo(analysis: ProfileAnalysis, fn: AnalyzedFunction, profilePath: string): string {
+function chooseDo(analysis: ProfileAnalysis, fn: AnalyzedFunction, profilePath: string, windowArgs: string): string {
   const total = analysis.total;
-  const fallback = `finderscope callees ${shQuote(profilePath)} ${shQuote(fn.key)}`;
+  const fallback = `finderscope callees ${shQuote(profilePath)} ${shQuote(fn.key)}${windowArgs}`;
   const selfShare = total > 0 ? fn.self / total : 0;
   if (selfShare < SELF_DOMINANT_MIN_SHARE) {
     return fallback;
@@ -91,7 +105,7 @@ function chooseDo(analysis: ProfileAnalysis, fn: AnalyzedFunction, profilePath: 
     .filter((f) => f.area === "own" && f.key !== fn.key && f.self > 0)
     .sort((a, b) => b.self - a.self)[0];
   if (nextOwn !== undefined && total > 0 && nextOwn.self / total >= NEXT_OWN_MIN_SHARE) {
-    return `finderscope lines ${shQuote(profilePath)} ${shQuote(nextOwn.key)}`;
+    return `finderscope lines ${shQuote(profilePath)} ${shQuote(nextOwn.key)}${windowArgs}`;
   }
   return fallback;
 }
@@ -148,7 +162,7 @@ function makeSourceReader(): (info: { path: string; line: number } | undefined) 
   };
 }
 
-export function buildLines(analysis: ProfileAnalysis, fn: AnalyzedFunction, profilePath: string, n = DEFAULT_COUNT): LinesData {
+export function buildLines(analysis: ProfileAnalysis, fn: AnalyzedFunction, profilePath: string, n = DEFAULT_COUNT, windowArgs = ""): LinesData {
   const base = {
     metric: analysis.metric,
     unit: metricUnit(analysis.metric),
@@ -158,7 +172,7 @@ export function buildLines(analysis: ProfileAnalysis, fn: AnalyzedFunction, prof
     lines: [],
     cut: 0,
   };
-  const fallbackDo = `finderscope callees ${shQuote(profilePath)} ${shQuote(fn.key)}`;
+  const fallbackDo = `finderscope callees ${shQuote(profilePath)} ${shQuote(fn.key)}${windowArgs}`;
 
   if (analysis.lineSelfTimes.size === 0) {
     return { ...base, note: NO_POSITION_TICKS_AT_ALL, do: fallbackDo };
@@ -194,31 +208,30 @@ export function buildLines(analysis: ProfileAnalysis, fn: AnalyzedFunction, prof
     ...base,
     lines: shown,
     cut: Math.max(0, entries.length - n),
-    note: undefined,
-    do: chooseDo(analysis, fn, profilePath),
+    note: windowArgs.length > 0 ? WINDOWED_ESTIMATE_NOTE : SELF_TIME_ONLY_NOTE,
+    do: chooseDo(analysis, fn, profilePath, windowArgs),
   };
 }
 
-export function formatLinesText(data: LinesData, profilePath: string): string {
+export function formatLinesText(data: LinesData, profilePath: string, windowArgs = ""): string {
   const lines: string[] = [
     `profile: ${profilePath}`,
     "",
     `finderscope lines "${data.function}" (self ${formatValue(data.metric, data.self)})`,
     "",
   ];
+  for (const l of data.lines) {
+    const sourceSuffix = l.source !== undefined ? `  ${l.source}` : "";
+    lines.push(
+      `  ${formatValue(data.metric, l.value).padStart(8)}  ${formatPercent(l.selfShare).padStart(6)}  ${formatPercent(l.totalShare).padStart(6)}  ${l.key}${sourceSuffix}`,
+    );
+  }
+  if (data.cut > 0) {
+    const shown = data.lines.length + data.cut;
+    lines.push(`  … ${data.cut} more (finderscope lines ${shQuote(profilePath)} ${shQuote(data.function)} -n ${shown}${windowArgs})`);
+  }
   if (data.note !== undefined) {
     lines.push(`note: ${data.note}`);
-  } else {
-    for (const l of data.lines) {
-      const sourceSuffix = l.source !== undefined ? `  ${l.source}` : "";
-      lines.push(
-        `  ${formatValue(data.metric, l.value).padStart(8)}  ${formatPercent(l.selfShare).padStart(6)}  ${formatPercent(l.totalShare).padStart(6)}  ${l.key}${sourceSuffix}`,
-      );
-    }
-    if (data.cut > 0) {
-      const shown = data.lines.length + data.cut;
-      lines.push(`  … ${data.cut} more (finderscope lines ${shQuote(profilePath)} ${shQuote(data.function)} -n ${shown})`);
-    }
   }
   lines.push("");
   lines.push(`do: ${data.do}`);

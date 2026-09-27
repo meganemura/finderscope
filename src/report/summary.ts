@@ -107,6 +107,10 @@ export interface SummaryData {
    *  this unit. */
   unit: "us" | "bytes";
   total: number;
+  /** Present only when `--from`/`--to` restricted this report to part of the profile - the window
+   *  actually used, in `unit`. `total` above is already this window's own total, not the whole
+   *  profile's; this field is what lets a reader (or a re-run) see which window produced it. */
+  window: { from: number; to: number } | undefined;
   /** "your code, top down": the outermost own frames (merged by key), each with a callee tree
    *  beneath it built the same way `callees` builds one - see model.ts's buildTopDown. Placed
    *  first in the text output (before `areas`) so an agent reads the profile's own phase split
@@ -162,6 +166,7 @@ function chooseDo(
   bySelf: RankedEntry[],
   handoffsByArea: Map<string, { key: string; value: number }[]>,
   profilePath: string,
+  windowArgs: string,
 ): string {
   const total = analysis.total;
   const share = (value: number): number => (total > 0 ? value / total : 0);
@@ -174,7 +179,7 @@ function chooseDo(
   if (topNonOwnArea !== undefined) {
     const topHandoff = handoffsByArea.get(topNonOwnArea)?.[0];
     if (topHandoff !== undefined && share(topHandoff.value) >= HANDOFF_DO_MIN_SHARE) {
-      return `finderscope callees ${shQuote(profilePath)} ${shQuote(topHandoff.key)}`;
+      return `finderscope callees ${shQuote(profilePath)} ${shQuote(topHandoff.key)}${windowArgs}`;
     }
   }
 
@@ -193,21 +198,21 @@ function chooseDo(
     topOwnSelf.self / total >= OWN_SELF_LINES_MIN_SHARE &&
     analysis.lineSelfTimes.has(topOwnSelf.key)
   ) {
-    return `finderscope lines ${shQuote(profilePath)} ${shQuote(topOwnSelf.key)}`;
+    return `finderscope lines ${shQuote(profilePath)} ${shQuote(topOwnSelf.key)}${windowArgs}`;
   }
 
   const topSelf = bySelf.find((f) => !isSpecialFrame(f.key));
   if (topSelf !== undefined && total > 0 && topSelf.share >= 0.2) {
-    return `finderscope callers ${shQuote(profilePath)} ${shQuote(topSelf.key)}`;
+    return `finderscope callers ${shQuote(profilePath)} ${shQuote(topSelf.key)}${windowArgs}`;
   }
   const topArea = [...analysis.areaTotals.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
   if (topArea !== undefined && !NON_PACKAGE_AREAS.has(topArea)) {
-    return `finderscope top ${shQuote(profilePath)} --area ${shQuote(topArea)}`;
+    return `finderscope top ${shQuote(profilePath)} --area ${shQuote(topArea)}${windowArgs}`;
   }
-  return `finderscope top ${shQuote(profilePath)}`;
+  return `finderscope top ${shQuote(profilePath)}${windowArgs}`;
 }
 
-export function buildSummary(analysis: ProfileAnalysis, profilePath: string): SummaryData {
+export function buildSummary(analysis: ProfileAnalysis, profilePath: string, window?: { from: number; to: number }, windowArgs = ""): SummaryData {
   const total = analysis.total;
   const share = (value: number): number => (total > 0 ? value / total : 0);
 
@@ -270,6 +275,7 @@ export function buildSummary(analysis: ProfileAnalysis, profilePath: string): Su
     metric: analysis.metric,
     unit: metricUnit(analysis.metric),
     total,
+    window,
     topDown,
     topDownCut: rootsCut,
     areas,
@@ -280,7 +286,7 @@ export function buildSummary(analysis: ProfileAnalysis, profilePath: string): Su
     handoffs,
     paths,
     note,
-    do: chooseDo(analysis, bySelfRankedRaw, handoffsByArea, profilePath),
+    do: chooseDo(analysis, bySelfRankedRaw, handoffsByArea, profilePath, windowArgs),
   };
 }
 
@@ -299,8 +305,8 @@ export function formatPercent(share: number): string {
 }
 
 function labelTopDownNode(node: CallTreeNode): string {
-  if (node.isSelf) return "(self)";
-  return node.area === "own" ? node.key : `${node.area}: ${node.key}`;
+  const base = node.isSelf ? "(self)" : node.area === "own" ? node.key : `${node.area}: ${node.key}`;
+  return node.recursive === true ? `${base} (recursive)` : base;
 }
 
 /**
@@ -318,16 +324,20 @@ function renderTopDownChildren(
   depth: number,
   profilePath: string,
   parentKey: string,
+  windowArgs: string,
   lines: string[],
 ): void {
   const indent = "  ".repeat(depth);
   for (const node of nodes) {
     lines.push(`  ${formatValue(metric, node.value).padStart(8)}  ${formatPercent(node.share).padStart(6)}  ${indent}${labelTopDownNode(node)}`);
-    renderTopDownChildren(node.children, node.childrenCut, metric, depth + 1, profilePath, node.key, lines);
+    renderTopDownChildren(node.children, node.childrenCut, metric, depth + 1, profilePath, node.key, windowArgs, lines);
+    if (node.depthCut === true) {
+      lines.push(`  ${indent}  … (finderscope callees ${shQuote(profilePath)} ${shQuote(node.key)}${windowArgs})`);
+    }
   }
   if (childrenCut > 0) {
     const shown = nodes.filter((n) => !n.isSelf).length + childrenCut;
-    lines.push(`  ${indent}… ${childrenCut} more (finderscope callees ${shQuote(profilePath)} ${shQuote(parentKey)} -n ${shown})`);
+    lines.push(`  ${indent}… ${childrenCut} more (finderscope callees ${shQuote(profilePath)} ${shQuote(parentKey)} -n ${shown}${windowArgs})`);
   }
 }
 
@@ -337,22 +347,28 @@ function renderTopDownChildren(
  * hidden behind a deeper own function that happens to hold more total time on its own (see
  * top.ts's own comment on rootEntries()).
  */
-function renderTopDown(data: SummaryData, profilePath: string, lines: string[]): void {
+function renderTopDown(data: SummaryData, profilePath: string, windowArgs: string, lines: string[]): void {
   lines.push("");
   lines.push("your code, top down:");
   for (const root of data.topDown) {
-    lines.push(`  ${formatValue(data.metric, root.value).padStart(8)}  ${formatPercent(root.share).padStart(6)}  ${root.key}`);
-    renderTopDownChildren(root.children, root.childrenCut, data.metric, 1, profilePath, root.key, lines);
+    lines.push(`  ${formatValue(data.metric, root.value).padStart(8)}  ${formatPercent(root.share).padStart(6)}  ${root.recursive === true ? `${root.key} (recursive)` : root.key}`);
+    renderTopDownChildren(root.children, root.childrenCut, data.metric, 1, profilePath, root.key, windowArgs, lines);
+    if (root.depthCut === true) {
+      lines.push(`    … (finderscope callees ${shQuote(profilePath)} ${shQuote(root.key)}${windowArgs})`);
+    }
   }
   if (data.topDownCut > 0) {
     const shown = data.topDown.length + data.topDownCut;
-    lines.push(`  … ${data.topDownCut} more (finderscope top ${shQuote(profilePath)} --by root -n ${shown})`);
+    lines.push(`  … ${data.topDownCut} more (finderscope top ${shQuote(profilePath)} --by root -n ${shown}${windowArgs})`);
   }
 }
 
-export function formatSummaryText(data: SummaryData, profilePath: string): string {
+export function formatSummaryText(data: SummaryData, profilePath: string, windowArgs = ""): string {
   const lines: string[] = [];
   lines.push(`profile: ${profilePath}`);
+  if (data.window !== undefined) {
+    lines.push(`window: ${formatValue(data.metric, data.window.from)} .. ${formatValue(data.metric, data.window.to)}`);
+  }
   lines.push("");
   if (data.metric === "bytes") {
     // A sampling heap profiler's own numbers are what was still live when it wrote the profile
@@ -366,7 +382,7 @@ export function formatSummaryText(data: SummaryData, profilePath: string): strin
   }
 
   if (data.topDown.length > 0) {
-    renderTopDown(data, profilePath, lines);
+    renderTopDown(data, profilePath, windowArgs, lines);
   }
 
   lines.push("");
@@ -382,7 +398,7 @@ export function formatSummaryText(data: SummaryData, profilePath: string): strin
   }
   if (data.topSelfCut > 0) {
     const shown = data.topSelf.length + data.topSelfCut;
-    lines.push(`  … ${data.topSelfCut} more (finderscope top ${shQuote(profilePath)} --by self -n ${shown})`);
+    lines.push(`  … ${data.topSelfCut} more (finderscope top ${shQuote(profilePath)} --by self -n ${shown}${windowArgs})`);
   }
 
   lines.push("");
@@ -392,7 +408,7 @@ export function formatSummaryText(data: SummaryData, profilePath: string): strin
   }
   if (data.yourCodeByTotalCut > 0) {
     const shown = data.yourCodeByTotal.length + data.yourCodeByTotalCut;
-    lines.push(`  … ${data.yourCodeByTotalCut} more (finderscope top ${shQuote(profilePath)} --area own --by total -n ${shown})`);
+    lines.push(`  … ${data.yourCodeByTotalCut} more (finderscope top ${shQuote(profilePath)} --area own --by total -n ${shown}${windowArgs})`);
   }
 
   if (data.handoffs.length > 0) {

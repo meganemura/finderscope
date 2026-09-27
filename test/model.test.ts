@@ -109,7 +109,7 @@ test("an \"own\" frame prints a project-relative path", () => {
   const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
   const fn = [...analysis.functions.values()].find((f) => f.name === "check")!;
   assert.equal(fn.key, "check dist/verbs/check.js:1:1");
-  assert.equal(resolveFunction(analysis, fn.key, "finderscope top 'p'"), fn);
+  assert.equal(resolveFunction(analysis, fn.key, "finderscope top 'p'", "/project"), fn);
 });
 
 test("a package frame prints the path inside the package, including the package name", () => {
@@ -121,7 +121,7 @@ test("a package frame prints the path inside the package, including the package 
   const fn = [...analysis.functions.values()].find((f) => f.name === "scan")!;
   assert.equal(fn.area, "typescript");
   assert.equal(fn.key, "scan typescript/lib/typescript.js:1:1");
-  assert.equal(resolveFunction(analysis, fn.key, "finderscope top 'p'"), fn);
+  assert.equal(resolveFunction(analysis, fn.key, "finderscope top 'p'", "/project"), fn);
 });
 
 test("a node: frame keeps its full node: specifier", () => {
@@ -132,7 +132,7 @@ test("a node: frame keeps its full node: specifier", () => {
   const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
   const fn = [...analysis.functions.values()].find((f) => f.name === "detectModuleFormat")!;
   assert.equal(fn.key, "detectModuleFormat node:internal/modules/esm/get_format:1:1");
-  assert.equal(resolveFunction(analysis, fn.key, "finderscope top 'p'"), fn);
+  assert.equal(resolveFunction(analysis, fn.key, "finderscope top 'p'", "/project"), fn);
 });
 
 // The three frame shapes with no real file at all: an empty url is "native" (a V8 builtin), a
@@ -161,7 +161,7 @@ for (const frame of NON_FILE_FRAMES) {
       assert.equal(fn.area, frame.area);
       const expectedKey = frame.url === "" ? "leaf (native)" : `leaf ${frame.url}:1:1`;
       assert.equal(fn.key, expectedKey);
-      assert.equal(resolveFunction(analysis, fn.key, "finderscope top 'p'"), fn);
+      assert.equal(resolveFunction(analysis, fn.key, "finderscope top 'p'", "/project"), fn);
     });
   }
 }

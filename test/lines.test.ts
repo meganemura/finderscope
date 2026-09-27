@@ -2,7 +2,7 @@
 // function, "main", with a real positionTicks array - two lines, tick counts 3 and 1, so the
 // tick-to-time apportionment divides evenly with no remainder to distribute, keeping the expected
 // numbers easy to verify by hand), and the "no positionTicks at all" case on the existing
-// tiny.cpuprofile fixture (design.md decision 2: a fact about the profile, not an error).
+// tiny.cpuprofile fixture (no positionTicks at all is a fact about the profile, not an error).
 import { test } from "vitest";
 import assert from "node:assert/strict";
 import { main } from "../src/cli.js";
@@ -31,6 +31,7 @@ finderscope lines "main src/main.js:1:1" (self 0.4ms)
 
      0.3ms   75.0%   60.0%  src/main.js:2
      0.1ms   25.0%   20.0%  src/main.js:3
+note: each row is self time only - V8's positionTicks never carries a call site, so a line that calls a hot function looks cold here; see where a line's time goes with the callees command
 
 do: finderscope callees '${LINES_FIXTURE}' 'main src/main.js:1:1'
 `,
@@ -52,12 +53,13 @@ test("lines json carries unit and the same numbers as the text", async () => {
       { key: "src/main.js:3", value: 100, selfShare: 0.25, totalShare: 0.2 },
     ],
     cut: 0,
+    note: "each row is self time only - V8's positionTicks never carries a call site, so a line that calls a hot function looks cold here; see where a line's time goes with the callees command",
     do: `finderscope callees '${LINES_FIXTURE}' 'main src/main.js:1:1'`,
   });
 });
 
-// design.md decision 2: no positionTicks anywhere in the profile is a fact to state, never an
-// error - the command still exits 0 and still ends with a runnable do:, falling back to callees.
+// No positionTicks anywhere in the profile is a fact to state, never an error - the command
+// still exits 0 and still ends with a runnable do:, falling back to callees.
 test("a profile with no positionTicks at all says so and falls back to callees, not an error", async () => {
   const { io, out } = capture();
   const code = await main(["lines", NO_TICKS_FIXTURE, "main", ...ROOT], io);
@@ -103,8 +105,8 @@ test("an invalid -n on lines reports a do: with the real function query, not a p
   );
 });
 
-// design.md decision 1/5: the next own function must itself be a real contributor (>= 1% of the
-// profile total) - "big" holds effectively all of it (self/total ~= 1.0, well past the 20% bar),
+// The next own function `do:` suggests must itself be a real contributor (>= 1% of the profile
+// total) - "big" holds effectively all of it (self/total ~= 1.0, well past the 20% bar),
 // but the only other own function, "tiny", holds under 0.04% - too small to be worth a whole
 // extra `lines` round trip, so `do:` falls back to `callees` on "big" itself.
 test("do: does not suggest lines for a next own function under 1% of the total", () => {
