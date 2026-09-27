@@ -3,6 +3,7 @@
 finderscope turns a V8 profile (`.cpuprofile`, `.heapprofile`) into a short, ranked report a
 coding agent can read in one pass, then names the next command to run. See
 [docs/design.md](docs/design.md) for the full design.
+[The agent skill](skills/finderscope/SKILL.md) gives a short profiling workflow for coding agents.
 
 ## Install
 
