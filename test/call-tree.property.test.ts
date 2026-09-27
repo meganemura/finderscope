@@ -15,17 +15,18 @@ const UNCUT = { depth: 50, childrenPerLevel: 10_000, expand: true };
 const UNCUT_TOP_DOWN = { ...UNCUT, rootCount: 10_000 };
 
 /**
- * True when `key` calls itself DIRECTLY (adjacent in a path's own key chain) on some real
- * (positive-value) path anywhere in the profile - checked against analysis.paths, the raw
- * per-sample chains, independent of buildCallTree's own folding logic, so this cannot pass merely
- * by re-deriving the same computation it is meant to check. Only meaningful for a function's own
- * TOP-level "down" tree, where the chains cover every occurrence of `key` in the whole profile
- * (buildCallTree's own comment on why it uses the FIRST occurrence, not a later one) - a nested
- * node deeper in someone else's tree is scoped to the paths that reach it through that specific
- * ancestor, which this whole-profile check does not model.
+ * True when `key` calls itself DIRECTLY at its first occurrence on some real (positive-value)
+ * path: the frame right after that first occurrence is `key` again. A "down" tree is rooted at
+ * each path's first occurrence (buildCallTree), so the root's `recursive` marker describes exactly
+ * that adjacency. A later self-call on the same path, such as the one in [A, B, A, A], sits under
+ * B and is folded into that nested A node, which carries its own marker. Checked against
+ * analysis.paths, the raw per-sample chains, independent of buildCallTree's folding logic.
  */
 function hasDirectSelfCall(analysis: ProfileAnalysis, key: string): boolean {
-  return analysis.paths.some((p) => p.value > 0 && p.keys.some((k, i) => k === key && p.keys[i + 1] === key));
+  return analysis.paths.some((p) => {
+    const first = p.keys.indexOf(key);
+    return p.value > 0 && first !== -1 && p.keys[first + 1] === key;
+  });
 }
 
 function checkInvariant(nodes: CallTreeNode[], parentValue: number, label: string): void {
