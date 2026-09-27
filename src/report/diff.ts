@@ -4,7 +4,7 @@
 // itself.
 
 import type { Metric, ProfileAnalysis } from "../model.js";
-import { formatPercent, isSpecialFrame, shQuote } from "./summary.js";
+import { formatPercent, isSpecialFrame, metricUnit, roundShare, shQuote } from "./summary.js";
 
 const DEFAULT_COUNT = 10;
 
@@ -24,6 +24,9 @@ export interface AreaDiffEntry {
 
 export interface DiffData {
   metric: Metric;
+  /** "us" or "bytes" - see metricUnit(). `delta` below is a share difference, not a value in this
+   *  unit (there is no single before/after value to report in a diff) - see design.md. */
+  unit: "us" | "bytes";
   functions: DiffEntry[];
   functionsCut: number;
   areas: AreaDiffEntry[];
@@ -117,15 +120,31 @@ export function buildDiff(before: ProfileAnalysis, after: ProfileAnalysis, befor
     .filter((e) => e.delta !== 0)
     .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
 
-  const functions = functionEntries.slice(0, n);
-  const areas = areaEntries.slice(0, n);
+  // Rounded from the raw (unrounded) entries above: functionEntries and areaEntries stay raw for
+  // chooseDo and for the delta!==0 filter above, matching every other report's rule of never
+  // rounding a value a threshold or an equality check still needs to read exactly. A row whose
+  // delta rounds to 0.000 - a real, nonzero raw delta too small for 3 decimals to show at all - is
+  // then dropped here, same as every other ranked list never carrying a value-0 row: shown here as
+  // "0.000" it would look like a change with no size, the one thing this list exists to rank. Its
+  // sort position was already exactly where the raw filter above put it (rounding to zero only
+  // happens for the smallest surviving |delta|s, so this can only shrink the tail, never reorder
+  // what remains).
+  const functionsRounded = functionEntries
+    .map((f) => ({ ...f, beforeShare: roundShare(f.beforeShare), afterShare: roundShare(f.afterShare), delta: roundShare(f.delta) }))
+    .filter((f) => f.delta !== 0);
+  const areasRounded = areaEntries
+    .map((a) => ({ ...a, beforeShare: roundShare(a.beforeShare), afterShare: roundShare(a.afterShare), delta: roundShare(a.delta) }))
+    .filter((a) => a.delta !== 0);
+  const functions = functionsRounded.slice(0, n);
+  const areas = areasRounded.slice(0, n);
 
   return {
     metric: before.metric,
+    unit: metricUnit(before.metric),
     functions,
-    functionsCut: Math.max(0, functionEntries.length - n),
+    functionsCut: Math.max(0, functionsRounded.length - n),
     areas,
-    areasCut: Math.max(0, areaEntries.length - n),
+    areasCut: Math.max(0, areasRounded.length - n),
     do: chooseDo(functionEntries, areaEntries, after, beforePath, afterPath),
   };
 }
@@ -138,7 +157,10 @@ function formatDelta(delta: number): string {
 export function formatDiffText(data: DiffData, beforePath: string, afterPath: string): string {
   const lines: string[] = [`finderscope diff ${beforePath} ${afterPath} (${data.metric})`, ""];
 
-  if (data.functions.length === 0 && data.areas.length === 0) {
+  // A row whose delta rounds to 0.000 is left out of `functions`/`areas` (buildDiff) and is not
+  // counted in functionsCut/areasCut: at the 3-decimal precision the report uses, it is no
+  // change. So "no change" means no delta of 0.001 or more, and no row cut for length.
+  if (data.functions.length === 0 && data.areas.length === 0 && data.functionsCut === 0 && data.areasCut === 0) {
     lines.push("no change");
     lines.push("");
     lines.push(`do: ${data.do}`);

@@ -8,10 +8,11 @@ import { test } from "vitest";
 import assert from "node:assert/strict";
 import * as hegel from "@hegeldev/hegel";
 import { parseCpuProfile } from "../src/profile/cpu.js";
-import { analyzeCpuProfile, buildCallTree, type CallTreeNode } from "../src/model.js";
+import { analyzeCpuProfile, buildCallTree, buildTopDown, type CallTreeNode } from "../src/model.js";
 import { drawCpuProfileJson } from "./helpers/profile-gen.js";
 
 const UNCUT = { depth: 50, childrenPerLevel: 10_000, expand: true };
+const UNCUT_TOP_DOWN = { ...UNCUT, rootCount: 10_000 };
 
 function checkInvariant(nodes: CallTreeNode[], parentValue: number, label: string): void {
   const sum = nodes.reduce((s, n) => s + n.value, 0);
@@ -61,6 +62,30 @@ test(
           // above it), which contributes nothing here. So the sum is at most fn.total, and is
           // usually exactly equal to it in any real profile.
           assert.ok(sum <= fn.total, `${fn.key}: callers sum ${sum} > total ${fn.total}`);
+        }
+      },
+      { testCases: 100 },
+    );
+  },
+  20_000,
+);
+
+test(
+  "self + direct children == the root's own value, at every expanded level of \"your code, top down\"",
+  () => {
+    hegel.test(
+      (tc) => {
+        const profile = parseCpuProfile(drawCpuProfileJson(tc));
+        const analysis = analyzeCpuProfile(profile, { root: "/project" });
+        const { roots, rootsCut } = buildTopDown(analysis, UNCUT_TOP_DOWN);
+        // drawCpuProfileJson's own frame pool has plenty of "own" (under /project) entries, so a
+        // profile with any samples at all usually has at least one root; skip the rare draw with
+        // none rather than asserting a property that requires the same invariant checkInvariant
+        // already covers on an empty tree.
+        tc.assume(roots.length > 0);
+        assert.equal(rootsCut, 0);
+        for (const root of roots) {
+          checkInvariant(root.children, root.value, root.key);
         }
       },
       { testCases: 100 },

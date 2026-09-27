@@ -38,6 +38,13 @@ export interface OracleResult {
   total: Map<string, number>;
   areaTotals: Map<string, number>;
   profileTotal: number;
+  /** Every positive-time sample's own root-to-leaf key chain, unfolded, with that sample's time -
+   *  the same shape ProfileAnalysis.paths (model.ts) carries, but built here by this file's own
+   *  plain stackOf() loop, not model.ts's chainOf/pathKeysOf. Used by
+   *  test/topdown-oracle.property.test.ts to check "your code, top down" (model.ts's
+   *  buildTopDown) against an independently-derived grouping of the same stacks, the same way this
+   *  whole file checks self/total/areaTotals against model.ts's own aggregation. */
+  paths: { keys: string[]; value: number }[];
 }
 
 function medianLower(values: number[]): number {
@@ -111,6 +118,7 @@ export function computeOracle(raw: RawOracleProfile, root: string): OracleResult
   const self = new Map<string, number>();
   const total = new Map<string, number>();
   const areaTotals = new Map<string, number>();
+  const paths: { keys: string[]; value: number }[] = [];
   let profileTotal = 0;
 
   for (let i = 0; i < raw.samples.length; i++) {
@@ -132,7 +140,12 @@ export function computeOracle(raw: RawOracleProfile, root: string): OracleResult
     for (const key of seenKeys) {
       total.set(key, (total.get(key) ?? 0) + time);
     }
+
+    // stackOf() walks leaf-to-root; reversed here so `keys` reads root-to-leaf, same order as
+    // ProfileAnalysis.paths.
+    const keys = stackOf(nodeId).reverse().map((id) => classifyId(id).key);
+    paths.push({ keys, value: time });
   }
 
-  return { self, total, areaTotals, profileTotal };
+  return { self, total, areaTotals, profileTotal, paths };
 }

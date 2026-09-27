@@ -1,0 +1,16 @@
+{
+  "nodes": [
+    {"id": 1, "callFrame": {"functionName": "(root)", "url": "", "lineNumber": -1, "columnNumber": -1}, "children": [2, 3]},
+    {"id": 2, "callFrame": {"functionName": "bigRoot", "url": "file:///project/src/big.js", "lineNumber": 0, "columnNumber": 0}, "children": [4]},
+    {"id": 3, "callFrame": {"functionName": "smallRoot", "url": "file:///project/src/small.js", "lineNumber": 0, "columnNumber": 0}, "children": []},
+    {"id": 4, "callFrame": {"functionName": "step1", "url": "file:///project/src/big.js", "lineNumber": 5, "columnNumber": 0}, "children": [5]},
+    {"id": 5, "callFrame": {"functionName": "step2", "url": "file:///project/src/big.js", "lineNumber": 10, "columnNumber": 0}, "children": [6]},
+    {"id": 6, "callFrame": {"functionName": "step3", "url": "file:///project/src/big.js", "lineNumber": 15, "columnNumber": 0}, "children": [7]},
+    {"id": 7, "callFrame": {"functionName": "step4", "url": "file:///project/src/big.js", "lineNumber": 20, "columnNumber": 0}, "children": [8]},
+    {"id": 8, "callFrame": {"functionName": "step5", "url": "file:///project/src/big.js", "lineNumber": 25, "columnNumber": 0}, "children": []}
+  ],
+  "startTime": 0,
+  "endTime": 600,
+  "samples": [8, 8, 8, 8, 8, 3],
+  "timeDeltas": [0, 100, 100, 100, 100, 100, 100]
+}

@@ -31,14 +31,26 @@ profiled program.
 
 | Command | Answers |
 |---|---|
-| `finderscope <profile>` | The summary: total, split by area, top functions by self and by total, the hottest call paths, and a `do:` line. |
-| `finderscope top <profile> [--by self\|total] [--area <area>] [-n N]` | A longer ranked list. |
+| `finderscope <profile>` | The summary: your code top down, split by area, top functions by self and by total, the hottest call paths, and a `do:` line. |
+| `finderscope top <profile> [--by self\|total\|root] [--area <area>] [-n N]` | A longer ranked list - `--by root` ranks "your code, top down"'s own roots. |
 | `finderscope callers <profile> <function>` | Which call paths lead to the function, with each path's share. |
 | `finderscope callees <profile> <function>` | Where the function's own total time goes. |
 | `finderscope diff <before> <after>` | The functions and areas whose share changed most, sorted by the size of the change. |
 | `finderscope run [--heap] -- <command...>` | Runs the command with `--cpu-prof` (and `--heap-prof`) in a scratch directory, then prints the summary for each profile it wrote. |
 
-Every command also takes `--json`. The JSON carries the same facts as the text, with a stable shape.
+Every command also takes `--json`. The JSON carries the same facts as the text, with a stable shape
+(see "JSON shape" below). Every report's JSON carries a top-level `unit`: `"us"` for a cpu profile
+(every value, total, and delta is microseconds) or `"bytes"` for a heap profile (every value and
+total is bytes; `diff`'s `delta` is always a share, in neither unit - see its own JSON block). A
+share (`share`, `areaShare`, `beforeShare`, `afterShare`, `delta`) is rounded to 3 decimal places
+(`0.973`); every other number is already an integer in its own unit and is never rounded. A ranked
+list - `topSelf`, `top`, a call tree's children, a hottest-path list - never carries a row whose own
+value is 0; a `… N more` cut count is the count of rows actually hidden, which is exactly the count
+of remaining nonzero rows, never a raw total that would include some invisible zero ones. `diff`
+has no `value` field to be 0 (it ranks a share change, not a value), so it applies the same rule to
+its own `delta` instead: a row whose delta rounds to 0.000 is left out of `functions`/`areas` too,
+and counted in `functionsCut`/`areasCut` - showing "0.000" would claim a change with no size at all,
+the one thing that list ranks.
 
 `run` sets `NODE_OPTIONS`, so child Node processes write profiles too. It reports each process, the
 largest first. It runs only the command the caller gave; SIGINT and SIGTERM are forwarded to it.
@@ -48,6 +60,19 @@ before it prints anything else for exactly that reason.
 
 ## How the report reads
 
+- The summary opens with "your code, top down": each path's root is its first own frame - the
+  root's own value is the sum of every path that reaches "own" code through it as that path's
+  first own frame - merged by key into at most 3 roots, heaviest first. Beneath each root is a
+  tree of its callees, built exactly like `callees` builds one for a single resolved function:
+  merged by key, an own frame expanded, a non-own subtree collapsed into one
+  `<area>: <entry frame>` line, depth 3, at most 5 children per level, sorted by value, with a
+  `(self)` line only where it is nonzero. When more than 3 roots exist, a line says so and names
+  `finderscope top <profile> --by root`, which ranks every root the same way (see "Commands"
+  above) - not `--area own --by total`, which ranks by a function's own total and so can leave a
+  real root hidden behind a deeper own function that happens to hold more total time. This section
+  alone is meant to give a program built from phase functions - an entry point that calls
+  `load` / `analyze` / `report` in turn - its phase split without a follow-up command, provided
+  every phase sits within 3 levels of its own root; a deeper split still needs `callees`.
 - A function is printed as `name path:line:col`, with 1-based line and column. The same text works
   as the `<function>` argument, so an agent can copy it into the next command. A plain substring of
   the name also works when it matches one function.
@@ -80,6 +105,133 @@ before it prints anything else for exactly that reason.
   (`native`), not about which package sat in between. `finderscope callees A` shows the full path
   through `lodash` to get there.
 
+## JSON shape
+
+One block per command, with a small real example each (from `test/fixtures/tiny.cpuprofile`,
+`--root /project`, values abbreviated with `...` where a real run has more entries). Every command
+below also shares the top-level `unit` field described above.
+
+`finderscope <profile> --json` (the summary):
+```json
+{
+  "metric": "time", "unit": "us", "total": 5400,
+  "topDown": [{ "key": "main src/main.js:10:3", "area": "own", "value": 4400, "share": 0.815,
+    "isSelf": false, "childrenCut": 0, "children": [
+      { "key": "(self)", "area": "own", "value": 1000, "share": 0.185, "isSelf": true, "children": [], "childrenCut": 0 },
+      { "key": "helper lodash/index.js:15:7", "area": "lodash", "value": 2900, "share": 0.537, "isSelf": false, "children": [], "childrenCut": 0 },
+      ...
+    ] }],
+  "topDownCut": 0,
+  "areas": [{ "area": "lodash", "value": 2900, "share": 0.537 }, ...],
+  "topSelf": [{ "key": "helper lodash/index.js:15:7", "value": 2900, "share": 0.537 }, ...],
+  "topSelfCut": 0,
+  "yourCodeByTotal": [{ "key": "main src/main.js:10:3", "value": 4400, "share": 0.815 }, ...],
+  "yourCodeByTotalCut": 0,
+  "handoffs": [{ "area": "lodash", "areaShare": 0.537, "frames": [{ "key": "main src/main.js:10:3", "share": 0.537 }] }],
+  "paths": [{ "segments": ["main src/main.js:10:3", "helper lodash/index.js:15:7"], "value": 2900, "share": 0.537 }, ...],
+  "do": "finderscope callees '<profile>' 'main src/main.js:10:3'"
+}
+```
+(`note` is a heap-only field - JSON.stringify drops a `note`/`area` field entirely rather than
+writing it as `null` when there is none, matching every other command below with an optional field.)
+
+`finderscope top <profile> --json`:
+```json
+{
+  "metric": "time", "unit": "us", "by": "self", "total": 5400,
+  "entries": [{ "key": "helper lodash/index.js:15:7", "area": "lodash", "value": 2900, "share": 0.537 }, ...],
+  "cut": 0,
+  "do": "finderscope callers '<profile>' 'helper lodash/index.js:15:7'"
+}
+```
+(`area` appears, as the string passed to `--area`, only when `--area` was given. `--by root` ranks
+"your code, top down"'s own roots instead of a function's self or total - same entry shape, `area`
+always `"own"` since a root is always an own frame by construction; this is the command the summary's
+own `topDownCut` hint names, so a root "your code, top down" had to cut still shows up somewhere.)
+
+`finderscope callers <profile> <fn> --json` (the tree; `--paths` below is the flat alternative):
+```json
+{
+  "metric": "time", "unit": "us", "function": "helper lodash/index.js:15:7", "total": 2900,
+  "children": [{ "key": "main src/main.js:10:3", "area": "own", "value": 2900, "share": 1,
+    "isSelf": false, "childrenCut": 0, "children": [
+      { "key": "(root)", "area": "program", "value": 2900, "share": 1, "isSelf": false, "children": [], "childrenCut": 0 }
+    ] }],
+  "childrenCut": 0,
+  "do": "finderscope callers '<profile>' 'main src/main.js:10:3'"
+}
+```
+
+`finderscope callers <profile> <fn> --paths --json`:
+```json
+{
+  "metric": "time", "unit": "us", "function": "helper lodash/index.js:15:7", "total": 2900,
+  "paths": [{ "segments": ["(root)", "main src/main.js:10:3", "helper lodash/index.js:15:7"], "value": 2900, "share": 1 }],
+  "cut": 0,
+  "do": "finderscope callers '<profile>' 'helper lodash/index.js:15:7'"
+}
+```
+
+`finderscope callees <profile> <fn> --json` (same shape as `callers`' tree, walked downward):
+```json
+{
+  "metric": "time", "unit": "us", "function": "main src/main.js:10:3", "total": 4400,
+  "children": [
+    { "key": "(self)", "area": "own", "value": 1000, "share": 0.227, "isSelf": true, "children": [], "childrenCut": 0 },
+    { "key": "helper lodash/index.js:15:7", "area": "lodash", "value": 2900, "share": 0.659, "isSelf": false, "children": [], "childrenCut": 0 },
+    ...
+  ],
+  "childrenCut": 0,
+  "do": "finderscope callees '<profile>' 'compute src/util.js:4:2'"
+}
+```
+
+`finderscope callees <profile> <fn> --paths --json` (same shape as `callers --paths`):
+```json
+{
+  "metric": "time", "unit": "us", "function": "main src/main.js:10:3", "total": 4400,
+  "paths": [{ "segments": ["main src/main.js:10:3", "helper lodash/index.js:15:7"], "value": 2900, "share": 0.659 }, ...],
+  "cut": 0,
+  "do": "finderscope callees '<profile>' 'main src/main.js:10:3'"
+}
+```
+
+`finderscope diff <before> <after> --json` (`beforeShare`/`afterShare`/`delta` are shares, not a
+value in `unit` - a diff has no single before/after value to report per row, only how its share of
+each profile's own total changed):
+```json
+{
+  "metric": "time", "unit": "us",
+  "functions": [{ "key": "helper lodash/index.js:15:7", "beforeShare": 0.537, "afterShare": 0.656, "delta": 0.119 }, ...],
+  "functionsCut": 0,
+  "areas": [{ "area": "lodash", "beforeShare": 0.537, "afterShare": 0.656, "delta": 0.119 }, ...],
+  "areasCut": 0,
+  "do": "finderscope callees '<after>' 'helper lodash/index.js:15:7'"
+}
+```
+
+`finderscope run --json [--heap] -- <command...>`:
+```json
+{
+  "scratchDir": "/tmp/finderscope-xxxxxx",
+  "profiles": [ /* one full summary object per profile written, largest total first */ ],
+  "errors": [{ "profile": "<path>", "error": "<message>", "do": "<command>" }],
+  "do": "<the first profile's own do:, or a fallback>"
+}
+```
+When the command wrote no profile at all (it never ran node, or it ended via a forwarded signal
+before V8 could write one - see noProfileWarning()), `profiles` and `errors` are both `[]` and an
+extra `warning` field, a plain string explaining why, appears alongside `do`:
+```json
+{ "scratchDir": "/tmp/finderscope-xxxxxx", "profiles": [], "errors": [], "warning": "<why>", "do": "<command>" }
+```
+
+Every error - a bad flag, a malformed profile, an internal bug - is the same two-field shape under
+`--json`, whichever command raised it:
+```json
+{ "error": "cannot read profile file <path>", "do": "check the path: ls '<path>'" }
+```
+
 ## Invariants the tests hold
 
 These are properties, tested with generated profiles:
@@ -88,6 +240,14 @@ These are properties, tested with generated profiles:
 - The area totals sum to the profile's total.
 - `diff` of a profile with itself reports no change.
 - Mapping a position through a source map that the test generated returns the original position.
+- In "your code, top down", each root's `(self)` value plus the sum of its own direct children's
+  values equals that root's own value - the same invariant `callees` already holds, recursively,
+  at every expanded node beneath it.
+- "Your code, top down"'s roots mean what design.md says: the sum of every root's value equals the
+  profile total minus the value of every path that reaches no own frame at all; each root's value
+  is at most that same function's own total; and every root is the first own key on every path
+  counted under it - checked against an independent regrouping of the same profile's own
+  per-sample stacks (test/helpers/oracle.ts), not against buildTopDown's own internal bookkeeping.
 
 Exact text and JSON shape are covered by example tests on small fixture profiles.
 

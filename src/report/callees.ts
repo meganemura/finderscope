@@ -10,7 +10,7 @@
 
 import type { AnalyzedFunction, CallTreeNode, Metric, ProfileAnalysis } from "../model.js";
 import { buildCallTree, groupKeyPaths } from "../model.js";
-import { formatPercent, formatValue, isSpecialFrame, shQuote } from "./summary.js";
+import { formatPercent, formatValue, isSpecialFrame, metricUnit, roundShare, roundTreeShares, shQuote } from "./summary.js";
 
 const DEFAULT_COUNT = 10;
 
@@ -22,6 +22,8 @@ export interface CalleesTreeOptions {
 
 export interface CalleesTreeData {
   metric: Metric;
+  /** "us" or "bytes" - see metricUnit(). */
+  unit: "us" | "bytes";
   function: string;
   total: number;
   children: CallTreeNode[];
@@ -62,9 +64,10 @@ export function buildCalleesTree(
   const tree = buildCallTree(analysis, fn, "down", { depth: options.depth, expand: options.expand, childrenPerLevel: options.n });
   return {
     metric: analysis.metric,
+    unit: metricUnit(analysis.metric),
     function: fn.key,
     total: fn.total,
-    children: tree.children,
+    children: roundTreeShares(tree.children),
     childrenCut: tree.childrenCut,
     do: chooseDo(tree.children, fn, profilePath),
   };
@@ -103,6 +106,8 @@ export function formatCalleesTreeText(data: CalleesTreeData, profilePath: string
 // --paths: the older flat list of distinct folded paths, by request behind a flag now.
 export interface CalleesPathsData {
   metric: Metric;
+  /** "us" or "bytes" - see metricUnit(). */
+  unit: "us" | "bytes";
   function: string;
   total: number;
   paths: { segments: string[]; value: number; share: number }[];
@@ -122,9 +127,10 @@ export function buildCalleesPaths(analysis: ProfileAnalysis, fn: AnalyzedFunctio
   const all = groupKeyPaths(suffixes, areaOf, fn.total);
   return {
     metric: analysis.metric,
+    unit: metricUnit(analysis.metric),
     function: fn.key,
     total: fn.total,
-    paths: all.slice(0, n),
+    paths: all.slice(0, n).map((p) => ({ ...p, share: roundShare(p.share) })),
     cut: Math.max(0, all.length - n),
     do: `finderscope callees ${shQuote(profilePath)} ${shQuote(fn.key)}`,
   };

@@ -500,7 +500,13 @@ function buildCallTreeLevel(chains: Chain[], areaOf: (key: string) => string, to
   const nodes: CallTreeNode[] = [];
   if (options.includeSelf) {
     const selfValue = chains.filter((c) => c.value > 0 && c.keys.length === 0).reduce((sum, c) => sum + c.value, 0);
-    nodes.push({ key: "(self)", area: "own", value: selfValue, share: share(selfValue), isSelf: true, children: [], childrenCut: 0 });
+    // Omitted when zero, not printed as a "0.0ms 0.0%" row: a node whose every chain kept going
+    // past it has nothing of its own to show, and the invariant checked in
+    // test/call-tree.property.test.ts (children incl. self sum to the parent's value) holds
+    // exactly the same whether a zero addend is present or left out.
+    if (selfValue > 0) {
+      nodes.push({ key: "(self)", area: "own", value: selfValue, share: share(selfValue), isSelf: true, children: [], childrenCut: 0 });
+    }
   }
   for (const [key, group] of shown) {
     const area = areaOf(key);
@@ -535,6 +541,66 @@ export function buildCallTree(analysis: ProfileAnalysis, fn: AnalyzedFunction, d
 
   const level = buildCallTreeLevel(chains, areaOf, fn.total, resolved.depth, { ...resolved, includeSelf: direction === "down" });
   return { children: level.nodes, childrenCut: level.cut };
+}
+
+export interface TopDownOptions {
+  rootCount?: number;
+  depth?: number;
+  childrenPerLevel?: number;
+  expand?: boolean;
+}
+
+export interface TopDownResult {
+  roots: CallTreeNode[];
+  rootsCut: number;
+}
+
+/**
+ * "Your code, top down": every contribution's own path has a *first* own frame - the outermost
+ * point at which it reaches code the agent can edit at all - and this merges those by key into a
+ * root, then builds a callee tree beneath each root the same way buildCallTree does for one
+ * already-resolved function (merged by key, an own frame expanded, a non-own subtree collapsed).
+ * A root's value is the sum of every path that reaches "own" code through it as the FIRST own
+ * frame on that path - not that function's own `.total` (AnalyzedFunction.total), which also
+ * counts a path that reaches the same function through a deeper own ancestor (recursion, or the
+ * same handler called from two different top-level own call sites); using `.total` here would
+ * double-count that second path under both its real root and this one. A path with no own frame
+ * at all (idle, a pure bootstrap chain) has no root and is not counted here - it never reaches
+ * code the agent can edit.
+ */
+export function buildTopDown(analysis: ProfileAnalysis, options: TopDownOptions = {}): TopDownResult {
+  const rootCount = options.rootCount ?? 3;
+  const depth = options.depth ?? 3;
+  const childrenPerLevel = options.childrenPerLevel ?? 5;
+  const expand = options.expand ?? false;
+  const total = analysis.total;
+  const share = (value: number): number => (total > 0 ? value / total : 0);
+  const areaOf = (key: string): string => analysis.functions.get(key)?.area ?? "unknown";
+
+  const chainsByRoot = new Map<string, Chain[]>();
+  for (const path of analysis.paths) {
+    if (path.value <= 0) continue;
+    const firstOwnIdx = path.keys.findIndex((k) => areaOf(k) === "own");
+    if (firstOwnIdx === -1) continue;
+    const rootKey = path.keys[firstOwnIdx]!;
+    const list = chainsByRoot.get(rootKey) ?? [];
+    list.push({ keys: path.keys.slice(firstOwnIdx + 1), value: path.value });
+    chainsByRoot.set(rootKey, list);
+  }
+
+  const rootTotals = [...chainsByRoot.entries()]
+    .map(([key, chains]) => ({ key, value: chains.reduce((s, c) => s + c.value, 0), chains }))
+    .sort((a, b) => b.value - a.value);
+
+  const shown = rootTotals.slice(0, rootCount);
+  const rootsCut = Math.max(0, rootTotals.length - rootCount);
+
+  const roots: CallTreeNode[] = shown.map(({ key, value, chains }) => {
+    const level = buildCallTreeLevel(chains, areaOf, total, depth, { depth, expand, childrenPerLevel, includeSelf: true });
+    return { key, area: "own", value, share: share(value), isSelf: false, children: level.nodes, childrenCut: level.cut };
+  });
+
+  return { roots, rootsCut };
 }
 
 interface AnalyzeCoreInput {

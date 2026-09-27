@@ -10,6 +10,16 @@ import { main } from "../src/cli.js";
 const CPU_FIXTURE = "test/fixtures/tiny.cpuprofile";
 const CPU_AFTER_FIXTURE = "test/fixtures/tiny-after.cpuprofile";
 const HEAP_FIXTURE = "test/fixtures/tiny.heapprofile";
+// 4 own roots (only 3 shown) and, under the heaviest one, 6 distinct node: leaf children (only 5
+// shown) - the one fixture in this file wide enough to force a "… N more" cut hint inside "your
+// code, top down" itself, both at the root list and inside a root's own tree.
+const WIDE_FIXTURE = "test/fixtures/wide.cpuprofile";
+// One deep own chain (bigRoot -> step1 -> ... -> step5, one linear path, so all six own functions
+// on it share the SAME total) plus one small, shallow own root (smallRoot) with a smaller total -
+// the fixture for "--by root" vs. "--area own --by total": the six tied, large totals along the
+// deep chain fill every slot of a small -n before smallRoot's own (smaller) total ever gets a
+// turn, even though smallRoot is a real, distinct root "your code, top down" always shows.
+const DEEP_ROOT_FIXTURE = "test/fixtures/deep-root.cpuprofile";
 const ROOT = ["--root", "/project"];
 
 // Every stdout write from every capture() in this file lands here too, so one final test (at the
@@ -45,6 +55,13 @@ describe("finderscope summary", () => {
 
 finderscope summary (time, total 5.4ms)
 
+your code, top down:
+     4.4ms   81.5%  main src/main.js:10:3
+     1.0ms   18.5%    (self)
+     2.9ms   53.7%    lodash: helper lodash/index.js:15:7
+     0.5ms    9.3%    compute src/util.js:4:2
+     0.5ms    9.3%      (self)
+
 areas:
   lodash                  2.9ms  53.7%
   own                     1.5ms  27.8%
@@ -57,7 +74,6 @@ top by self:
      0.9ms   16.7%  (idle)
      0.5ms    9.3%  compute src/util.js:4:2
      0.1ms    1.9%  (program)
-     0.0ms    0.0%  (root)
 
 your code by total:
      4.4ms   81.5%  main src/main.js:10:3
@@ -83,38 +99,62 @@ do: finderscope callees '${CPU_FIXTURE}' 'main src/main.js:10:3'
     const data = JSON.parse(out.join(""));
     assert.deepEqual(data, {
       metric: "time",
+      unit: "us",
       total: 5400,
+      topDown: [
+        {
+          key: "main src/main.js:10:3",
+          area: "own",
+          value: 4400,
+          share: 0.815,
+          isSelf: false,
+          children: [
+            { key: "(self)", area: "own", value: 1000, share: 0.185, isSelf: true, children: [], childrenCut: 0 },
+            { key: "helper lodash/index.js:15:7", area: "lodash", value: 2900, share: 0.537, isSelf: false, children: [], childrenCut: 0 },
+            {
+              key: "compute src/util.js:4:2",
+              area: "own",
+              value: 500,
+              share: 0.093,
+              isSelf: false,
+              children: [{ key: "(self)", area: "own", value: 500, share: 0.093, isSelf: true, children: [], childrenCut: 0 }],
+              childrenCut: 0,
+            },
+          ],
+          childrenCut: 0,
+        },
+      ],
+      topDownCut: 0,
       areas: [
-        { area: "lodash", value: 2900, share: 2900 / 5400 },
-        { area: "own", value: 1500, share: 1500 / 5400 },
-        { area: "idle", value: 900, share: 900 / 5400 },
-        { area: "program", value: 100, share: 100 / 5400 },
+        { area: "lodash", value: 2900, share: 0.537 },
+        { area: "own", value: 1500, share: 0.278 },
+        { area: "idle", value: 900, share: 0.167 },
+        { area: "program", value: 100, share: 0.019 },
       ],
       topSelf: [
-        { key: "helper lodash/index.js:15:7", value: 2900, share: 2900 / 5400 },
-        { key: "main src/main.js:10:3", value: 1000, share: 1000 / 5400 },
-        { key: "(idle)", value: 900, share: 900 / 5400 },
-        { key: "compute src/util.js:4:2", value: 500, share: 500 / 5400 },
-        { key: "(program)", value: 100, share: 100 / 5400 },
-        { key: "(root)", value: 0, share: 0 },
+        { key: "helper lodash/index.js:15:7", value: 2900, share: 0.537 },
+        { key: "main src/main.js:10:3", value: 1000, share: 0.185 },
+        { key: "(idle)", value: 900, share: 0.167 },
+        { key: "compute src/util.js:4:2", value: 500, share: 0.093 },
+        { key: "(program)", value: 100, share: 0.019 },
       ],
       topSelfCut: 0,
       yourCodeByTotal: [
-        { key: "main src/main.js:10:3", value: 4400, share: 4400 / 5400 },
-        { key: "compute src/util.js:4:2", value: 500, share: 500 / 5400 },
+        { key: "main src/main.js:10:3", value: 4400, share: 0.815 },
+        { key: "compute src/util.js:4:2", value: 500, share: 0.093 },
       ],
       yourCodeByTotalCut: 0,
       handoffs: [
         {
           area: "lodash",
-          areaShare: 2900 / 5400,
-          frames: [{ key: "main src/main.js:10:3", share: 2900 / 5400 }],
+          areaShare: 0.537,
+          frames: [{ key: "main src/main.js:10:3", share: 0.537 }],
         },
       ],
       paths: [
-        { segments: ["main src/main.js:10:3", "helper lodash/index.js:15:7"], value: 2900, share: 2900 / 5400 },
-        { segments: ["main src/main.js:10:3"], value: 1000, share: 1000 / 5400 },
-        { segments: ["(idle)"], value: 900, share: 900 / 5400 },
+        { segments: ["main src/main.js:10:3", "helper lodash/index.js:15:7"], value: 2900, share: 0.537 },
+        { segments: ["main src/main.js:10:3"], value: 1000, share: 0.185 },
+        { segments: ["(idle)"], value: 900, share: 0.167 },
       ],
       do: `finderscope callees '${CPU_FIXTURE}' 'main src/main.js:10:3'`,
     });
@@ -130,6 +170,11 @@ do: finderscope callees '${CPU_FIXTURE}' 'main src/main.js:10:3'
 
 finderscope summary (bytes, total 8.0KB still live when the process exited - not the peak)
 
+your code, top down:
+     8.0KB  100.0%  allocateBuffers src/alloc.js:6:4
+     2.0KB   25.0%    (self)
+     6.0KB   75.0%    leftpad: helperAlloc leftpad/index.js:3:2
+
 areas:
   leftpad                 6.0KB  75.0%
   own                     2.0KB  25.0%
@@ -137,7 +182,6 @@ areas:
 top by self:
      6.0KB   75.0%  helperAlloc leftpad/index.js:3:2
      2.0KB   25.0%  allocateBuffers src/alloc.js:6:4
-        0B    0.0%  (root)
 
 your code by total:
      8.0KB  100.0%  allocateBuffers src/alloc.js:6:4
@@ -166,6 +210,28 @@ do: finderscope callees '${HEAP_FIXTURE}' 'allocateBuffers src/alloc.js:6:4'
     );
     assert.equal(data.do, `finderscope callees '${HEAP_FIXTURE}' 'allocateBuffers src/alloc.js:6:4'`);
   });
+
+  // Regression target: "your code, top down" is the one section whose "… N more" hints name a
+  // node other than the profile's own top-level anchor (a nested node's own key, or - for the root
+  // list itself - a different command altogether, `top --by root`). Both must still carry the
+  // REAL profile path, single-quoted, not a bare "<profile>" placeholder - this fixture is wide
+  // enough (4 own roots, 6 leaf children under the heaviest) to force a cut at both the root list
+  // and inside a root's own tree in the same run.
+  test("top-down's own \"… N more\" hints carry the real profile path and a real node key", async () => {
+    const { io, out } = capture();
+    const code = await main([WIDE_FIXTURE, ...ROOT], io);
+    assert.equal(code, 0);
+    const text = out.join("");
+    assert.ok(
+      text.includes(`… 1 more (finderscope callees '${WIDE_FIXTURE}' 'ownA src/a.js:1:1' -n 6)`),
+      `expected the nested cut hint to name the real profile path and node key, got:\n${text}`,
+    );
+    assert.ok(
+      text.includes(`… 1 more (finderscope top '${WIDE_FIXTURE}' --by root -n 4)`),
+      `expected the root-list cut hint to name the real profile path, got:\n${text}`,
+    );
+    assert.doesNotMatch(text, /<profile>|<function>/);
+  });
 });
 
 describe("finderscope top", () => {
@@ -183,7 +249,6 @@ finderscope top (by self, total 5.4ms)
      0.9ms   16.7%  idle         (idle)
      0.5ms    9.3%  own          compute src/util.js:4:2
      0.1ms    1.9%  program      (program)
-     0.0ms    0.0%  program      (root)
 
 do: finderscope callers '${CPU_FIXTURE}' 'helper lodash/index.js:15:7'
 `,
@@ -192,12 +257,13 @@ do: finderscope callers '${CPU_FIXTURE}' 'helper lodash/index.js:15:7'
     const json = capture();
     await main(["top", CPU_FIXTURE, ...ROOT, "--json"], json.io);
     const data = JSON.parse(json.out.join(""));
+    assert.equal(data.unit, "us");
     assert.equal(data.by, "self");
     assert.equal(data.cut, 0);
     assert.equal(data.do, `finderscope callers '${CPU_FIXTURE}' 'helper lodash/index.js:15:7'`);
     assert.deepEqual(
       data.entries.map((e: { key: string }) => e.key),
-      ["helper lodash/index.js:15:7", "main src/main.js:10:3", "(idle)", "compute src/util.js:4:2", "(program)", "(root)"],
+      ["helper lodash/index.js:15:7", "main src/main.js:10:3", "(idle)", "compute src/util.js:4:2", "(program)"],
     );
   });
 
@@ -208,6 +274,31 @@ do: finderscope callers '${CPU_FIXTURE}' 'helper lodash/index.js:15:7'
     const data = JSON.parse(out.join(""));
     assert.equal(data.entries.length, 1);
     assert.equal(data.entries[0].key, "helper lodash/index.js:15:7");
+  });
+
+  test("--by root ranks top-down's own roots; --area own --by total can hide a small one behind a deep tied chain", async () => {
+    const byTotal = capture();
+    const codeByTotal = await main(["top", DEEP_ROOT_FIXTURE, ...ROOT, "--area", "own", "--by", "total", "-n", "3", "--json"], byTotal.io);
+    assert.equal(codeByTotal, 0);
+    const byTotalData = JSON.parse(byTotal.out.join(""));
+    const byTotalKeys = byTotalData.entries.map((e: { key: string }) => e.key);
+    assert.equal(byTotalKeys.length, 3);
+    assert.ok(
+      byTotalKeys.every((k: string) => k.startsWith("step")),
+      `expected --area own --by total -n 3 to fill up on the deep chain's tied totals alone, got: ${byTotalKeys.join(", ")}`,
+    );
+    assert.ok(!byTotalKeys.some((k: string) => k.startsWith("smallRoot")), "smallRoot should be hidden behind the deep chain here");
+
+    const byRoot = capture();
+    const codeByRoot = await main(["top", DEEP_ROOT_FIXTURE, ...ROOT, "--by", "root", "--json"], byRoot.io);
+    assert.equal(codeByRoot, 0);
+    const byRootData = JSON.parse(byRoot.out.join(""));
+    assert.equal(byRootData.unit, "us");
+    assert.equal(byRootData.cut, 0);
+    assert.deepEqual(byRootData.entries, [
+      { key: "bigRoot src/big.js:1:1", area: "own", value: 500, share: 0.833 },
+      { key: "smallRoot src/small.js:1:1", area: "own", value: 100, share: 0.167 },
+    ]);
   });
 
   test("an unknown flag is a CliError with a do:", async () => {
@@ -341,6 +432,7 @@ do: finderscope callees '${CPU_AFTER_FIXTURE}' 'helper lodash/index.js:15:7'
     await main(["diff", CPU_FIXTURE, CPU_FIXTURE, ...ROOT, "--json"], json.io);
     assert.deepEqual(JSON.parse(json.out.join("")), {
       metric: "time",
+      unit: "us",
       functions: [],
       functionsCut: 0,
       areas: [],
@@ -405,17 +497,26 @@ describe("errors", () => {
 
 // This describe block runs last (vitest runs a file's own tests in declaration order), after
 // every test above has pushed its own stdout into allOutputs - so by the time this runs, it has
-// every `do:` line every example test in this file produced, text and JSON alike, with no second,
-// separately maintained list of commands to keep in sync by hand.
-describe("every do: line this file produced parses as a real shell command", () => {
-  test("sh -n -c reports no syntax error for any of them", () => {
+// every `do:` line AND every "… N more" cut-hint command this whole file produced, text and JSON
+// alike, with no second, separately maintained list of commands to keep in sync by hand. Every
+// one of these strings is a command an agent is expected to copy and run as-is, so each must both
+// parse under `sh` and actually be runnable: no unresolved "<profile>"/"<function>" placeholder
+// left in place of a real value the command already had in hand.
+describe("every do: and \"… N more\" command this file produced parses and is runnable as-is", () => {
+  test("sh -n -c reports no syntax error, and none of them still carries a <placeholder>", () => {
     assert.ok(allOutputs.length > 0, "allOutputs is empty - did the tests above run first?");
 
-    const doLines = new Set<string>();
+    const commands = new Set<string>();
     for (const output of allOutputs) {
-      // Text output: a line starting with "do: ". JSON output: a top-level "do" field.
+      // Text output: a line starting with "do: ", or a "… N more (<command>)" cut hint - both
+      // `finderscope`'s own summary/topDown/top/callers/callees renderers and `run`'s per-profile
+      // text blocks print these. JSON output: a top-level "do" field (JSON has no cut-hint command
+      // string of its own - a cut is a plain integer field there, e.g. "topDownCut").
       for (const match of output.matchAll(/^do: (.+)$/gm)) {
-        doLines.add(match[1]!);
+        commands.add(match[1]!);
+      }
+      for (const match of output.matchAll(/… \d+ more \((.+)\)$/gm)) {
+        commands.add(match[1]!);
       }
       let parsed: unknown;
       try {
@@ -424,14 +525,27 @@ describe("every do: line this file produced parses as a real shell command", () 
         continue;
       }
       if (parsed !== null && typeof parsed === "object" && "do" in parsed && typeof (parsed as { do: unknown }).do === "string") {
-        doLines.add((parsed as { do: string }).do);
+        commands.add((parsed as { do: string }).do);
       }
     }
-    assert.ok(doLines.size > 0, "found no do: lines at all among allOutputs - the extraction above is broken");
+    assert.ok(commands.size > 0, "found no do:/… more commands at all among allOutputs - the extraction above is broken");
 
-    for (const line of doLines) {
-      const result = spawnSync("sh", ["-n", "-c", line]);
-      assert.equal(result.status, 0, `sh -n -c reported a syntax error for do: line: ${line}\n${result.stderr.toString()}`);
+    for (const command of commands) {
+      const result = spawnSync("sh", ["-n", "-c", command]);
+      assert.equal(result.status, 0, `sh -n -c reported a syntax error for: ${command}\n${result.stderr.toString()}`);
+      // Only a real "finderscope <subcommand> ..." command is checked for a leftover
+      // <placeholder>: it is always built from data the code already had in hand (a profile path,
+      // a resolved function key), so "<profile>"/"<function>" there means a real value was dropped
+      // on the floor. The bare USAGE string (this file's own "no arguments at all" test) legitimately
+      // uses "<profile>"/"<fn>" - there is no profile at all yet for it to name, and it starts with
+      // "usage: ", not "finderscope ", so this filter leaves it alone.
+      if (command.startsWith("finderscope ")) {
+        assert.doesNotMatch(
+          command,
+          /<[a-zA-Z][\w-]*>/,
+          `command still carries an unresolved <placeholder> instead of the real value it had in hand: ${command}`,
+        );
+      }
     }
   });
 });

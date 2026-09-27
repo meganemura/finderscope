@@ -14,7 +14,7 @@ npm install --save-dev finderscope
 
 ```
 finderscope <profile> [--root dir] [--json]
-finderscope top <profile> [--by self|total] [--area <area>] [-n N] [--json]
+finderscope top <profile> [--by self|total|root] [--area <area>] [-n N] [--json]
 finderscope callers <profile> <function> [--expand] [--paths] [-n N] [--json]
 finderscope callees <profile> <function> [--expand] [--paths] [-n N] [--json]
 finderscope diff <before> <after> [-n N] [--json]
@@ -23,6 +23,10 @@ finderscope run [--heap] [--root dir] -- <command...>
 
 `<function>` accepts either a function key exactly as a report printed it (`name path:line:col`),
 or any substring of the name that matches exactly one function.
+
+Every `--json` report carries a top-level `unit` (`"us"` for a cpu profile, `"bytes"` for a heap
+profile) that every value and total in it is measured in; every share is a 0..1 fraction rounded to
+3 decimal places (`0.973`). See [docs/design.md](docs/design.md) for the full JSON shape.
 
 `callers`/`callees` print a tree of direct callers/callees merged by function key (default depth
 2), not one line per distinct sample path - a hot function's time usually scatters across
@@ -35,33 +39,39 @@ still there, behind `--paths`.
 ## Example
 
 ```
-$ finderscope run -- node my-script.js
+$ finderscope run -- node test/fixtures/busy-script.js
 
 scratch dir: /tmp/finderscope-xxxxxx (kept on purpose - re-query it with finderscope callers/callees/top)
+
 profile: /tmp/finderscope-xxxxxx/CPU.20260101.000000.12345.0.001.cpuprofile
 
-finderscope summary (time, total 201.7ms)
+finderscope summary (time, total 201.0ms)
+
+your code, top down:
+   199.4ms   99.2%  (anonymous) test/fixtures/busy-script.js:1:1
+     0.3ms    0.2%    (self)
+   199.1ms   99.1%    busy test/fixtures/busy-script.js:3:14
+   199.1ms   99.1%      (self)
 
 areas:
-  own                   199.1ms  98.7%
-  idle                    1.4ms  0.7%
-  node                    1.2ms  0.6%
+  own                   199.4ms  99.2%
+  idle                    1.6ms  0.8%
 
 top by self:
-   199.1ms   98.7%  busy my-script.js:3:14
-     1.4ms    0.7%  (idle)
-     ...
+   199.1ms   99.1%  busy test/fixtures/busy-script.js:3:14
+     1.6ms    0.8%  (idle)
+     0.3ms    0.2%  (anonymous) test/fixtures/busy-script.js:1:1
 
 your code by total:
-   199.1ms   98.7%  (anonymous) my-script.js:1:1
-   199.1ms   98.7%  busy my-script.js:3:14
+   199.4ms   99.2%  (anonymous) test/fixtures/busy-script.js:1:1
+   199.1ms   99.1%  busy test/fixtures/busy-script.js:3:14
 
 hottest paths:
-   199.1ms   98.7%  (anonymous) my-script.js:1:1 -> busy my-script.js:3:14
-     1.4ms    0.7%  (idle)
-     1.2ms    0.6%  [node x16]
+   199.1ms   99.1%  (anonymous) test/fixtures/busy-script.js:1:1 -> busy test/fixtures/busy-script.js:3:14
+     1.6ms    0.8%  (idle)
+     0.3ms    0.2%  (anonymous) test/fixtures/busy-script.js:1:1
 
-do: finderscope callers '/tmp/finderscope-xxxxxx/CPU.20260101.000000.12345.0.001.cpuprofile' 'busy my-script.js:3:14'
+do: finderscope callers '/tmp/finderscope-xxxxxx/CPU.20260101.000000.12345.0.001.cpuprofile' 'busy test/fixtures/busy-script.js:3:14'
 ```
 
 Every argument in a `do:` or `… more` command - a profile path, a function key - is single-quoted,

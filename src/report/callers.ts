@@ -11,7 +11,7 @@
 
 import type { AnalyzedFunction, CallTreeNode, Metric, ProfileAnalysis } from "../model.js";
 import { buildCallTree, groupKeyPaths } from "../model.js";
-import { formatPercent, formatValue, isSpecialFrame, shQuote } from "./summary.js";
+import { formatPercent, formatValue, isSpecialFrame, metricUnit, roundShare, roundTreeShares, shQuote } from "./summary.js";
 
 const DEFAULT_COUNT = 10;
 
@@ -23,6 +23,8 @@ export interface CallersTreeOptions {
 
 export interface CallersTreeData {
   metric: Metric;
+  /** "us" or "bytes" - see metricUnit(). */
+  unit: "us" | "bytes";
   function: string;
   total: number;
   children: CallTreeNode[];
@@ -53,9 +55,10 @@ export function buildCallersTree(
   const do_ = chooseDo(tree.children, profilePath) ?? fallback;
   return {
     metric: analysis.metric,
+    unit: metricUnit(analysis.metric),
     function: fn.key,
     total: fn.total,
-    children: tree.children,
+    children: roundTreeShares(tree.children),
     childrenCut: tree.childrenCut,
     do: do_,
   };
@@ -93,6 +96,8 @@ export function formatCallersTreeText(data: CallersTreeData, profilePath: string
 // --paths: the older flat list of distinct folded paths, by request behind a flag now.
 export interface CallersPathsData {
   metric: Metric;
+  /** "us" or "bytes" - see metricUnit(). */
+  unit: "us" | "bytes";
   function: string;
   total: number;
   paths: { segments: string[]; value: number; share: number }[];
@@ -112,9 +117,10 @@ export function buildCallersPaths(analysis: ProfileAnalysis, fn: AnalyzedFunctio
   const all = groupKeyPaths(prefixes, areaOf, fn.total);
   return {
     metric: analysis.metric,
+    unit: metricUnit(analysis.metric),
     function: fn.key,
     total: fn.total,
-    paths: all.slice(0, n),
+    paths: all.slice(0, n).map((p) => ({ ...p, share: roundShare(p.share) })),
     cut: Math.max(0, all.length - n),
     do: `finderscope callers ${shQuote(profilePath)} ${shQuote(fn.key)}`,
   };

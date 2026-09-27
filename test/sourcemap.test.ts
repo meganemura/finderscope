@@ -26,9 +26,8 @@ test("sources resolve against the MAP file's own directory, not the script's dir
     // A relative source with no "../" - resolving it against "out/" (the script's own directory,
     // the old, wrong baseDir) lands at out/src/x.ts; resolving it against "maps/" (the map's own
     // directory, the fix) lands at maps/src/x.ts - the two disagree, so this case actually
-    // distinguishes the bug from the fix (a source like "../src/x.ts" would coincidentally agree
-    // when out/ and maps/ sit at the same depth, which is why the original repro's first case
-    // needed a second one to actually catch this).
+    // distinguishes the bug from the fix. A source like "../src/x.ts" would coincidentally agree
+    // when out/ and maps/ sit at the same depth, so it cannot tell the two apart.
     writeFileSync(join(dir, "out", "x.js"), "a();\n//# sourceMappingURL=../maps/x.js.map\n");
     writeFileSync(join(dir, "maps", "x.js.map"), JSON.stringify({ version: 3, sources: ["src/x.ts"], names: [], mappings: "AAAA" }));
 

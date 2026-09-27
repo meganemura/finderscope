@@ -280,8 +280,8 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       checkKnownOptions(options, new Set(["json", "root", "by", "area", "n"]), `finderscope top ${shQuote(profilePath)}`);
       const n = parsePositiveInt(optionString(options, "n"), `finderscope top ${shQuote(profilePath)} -n '<positive integer>'`);
       const by = optionString(options, "by");
-      if (by !== undefined && by !== "self" && by !== "total") {
-        throw new CliError(`invalid --by ${by}`, `finderscope top ${shQuote(profilePath)} --by self|total`);
+      if (by !== undefined && by !== "self" && by !== "total" && by !== "root") {
+        throw new CliError(`invalid --by ${by}; use self, total or root`,`finderscope top ${shQuote(profilePath)} --by self`);
       }
       return attributeUnexpectedErrorsTo([profilePath], () => {
         const analysis = loadAnalysis(profilePath, root);

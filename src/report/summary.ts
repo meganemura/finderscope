@@ -5,7 +5,8 @@
 // Boundary: does not compute anything from the raw profile - only reshapes a ProfileAnalysis
 // (model.ts) into the summary's own bounded shape.
 
-import type { Metric, ProfileAnalysis } from "../model.js";
+import type { CallTreeNode, Metric, ProfileAnalysis } from "../model.js";
+import { buildTopDown } from "../model.js";
 
 /**
  * Wraps `value` in single quotes, POSIX-style (`'` becomes `'\''`), so every argument a `do:` or
@@ -16,6 +17,31 @@ import type { Metric, ProfileAnalysis } from "../model.js";
  */
 export function shQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/** "us" for a cpu profile's microseconds, "bytes" for a heap profile's bytes - stated once per
+ *  JSON report (design.md) so an agent never has to guess which unit a bare number is in. */
+export function metricUnit(metric: Metric): "us" | "bytes" {
+  return metric === "bytes" ? "bytes" : "us";
+}
+
+/**
+ * Rounds a 0..1 share to 3 decimal places (0.973) for display - every OTHER number in a report
+ * (a self/total/delta value) is already an integer in its own unit and needs no rounding at all.
+ * Never applied before a `do:` threshold check (chooseDo's 0.2, HANDOFF_AREA_MIN_SHARE, ...): a
+ * raw 0.1996 rounds to 0.2 and would silently change which command `do:` picks, so every such
+ * check reads the unrounded share computed straight from analysis, and only the value handed back
+ * for display is rounded.
+ */
+export function roundShare(share: number): number {
+  return Math.round(share * 1000) / 1000;
+}
+
+/** Applies roundShare to every share in a call tree, recursively - callers.ts, callees.ts, and
+ *  this module's own topDown section all render a CallTreeNode[] from model.ts, which computes
+ *  shares from raw division and has no reason to round (model.ts's boundary excludes display). */
+export function roundTreeShares(nodes: CallTreeNode[]): CallTreeNode[] {
+  return nodes.map((n) => ({ ...n, share: roundShare(n.share), children: roundTreeShares(n.children) }));
 }
 
 const SELF_COUNT = 10;
@@ -70,7 +96,16 @@ export interface HandoffEntry {
 
 export interface SummaryData {
   metric: Metric;
+  /** "us" or "bytes" - see metricUnit(). Every value, total, and delta in this whole object is in
+   *  this unit. */
+  unit: "us" | "bytes";
   total: number;
+  /** "your code, top down": the outermost own frames (merged by key), each with a callee tree
+   *  beneath it built the same way `callees` builds one - see model.ts's buildTopDown. Placed
+   *  first in the text output (before `areas`) so an agent reads the profile's own phase split
+   *  before anything else. */
+  topDown: CallTreeNode[];
+  topDownCut: number;
   areas: AreaEntry[];
   topSelf: RankedEntry[];
   topSelfCut: number;
@@ -156,25 +191,44 @@ export function buildSummary(analysis: ProfileAnalysis, profilePath: string): Su
   const own = functions.filter((f) => f.area === "own");
   const ownByTotal = [...own].sort((a, b) => b.total - a.total);
 
-  const bySelfRanked = bySelf.map((f) => ({ key: f.key, value: f.self, share: share(f.self) }));
-  const topSelf = bySelfRanked.slice(0, SELF_COUNT);
-  const yourCodeByTotal = ownByTotal
+  // Raw (unrounded), and NOT filtered to nonzero self: chooseDo below only asks "is there a
+  // non-special function holding at least a fifth of the total", and rounding first could shift a
+  // 0.1996 share across the 0.2 threshold, silently changing which do: it picks.
+  const bySelfRankedRaw = bySelf.map((f) => ({ key: f.key, value: f.self, share: share(f.self) }));
+  const bySelfNonZero = bySelfRankedRaw.filter((f) => f.value > 0);
+  const topSelf = bySelfNonZero.slice(0, SELF_COUNT).map((f) => ({ ...f, share: roundShare(f.share) }));
+  const topSelfCut = Math.max(0, bySelfNonZero.length - SELF_COUNT);
+
+  // An "own" function's total can never actually be 0 here (model.ts's analyzeCore only adds a
+  // function to `functions` at all via a positive self or a positive total contribution), so this
+  // filter is defensive, not load-bearing - kept for the same reason topSelf's is: a ranked list
+  // never carries a value-0 row, by construction, not by coincidence of today's data.
+  const ownByTotalNonZero = ownByTotal.filter((f) => f.total > 0);
+  const yourCodeByTotal = ownByTotalNonZero
     .slice(0, OWN_TOTAL_COUNT)
-    .map((f) => ({ key: f.key, value: f.total, share: share(f.total) }));
-  const areas = [...analysis.areaTotals.entries()]
+    .map((f) => ({ key: f.key, value: f.total, share: roundShare(share(f.total)) }));
+  const yourCodeByTotalCut = Math.max(0, ownByTotalNonZero.length - OWN_TOTAL_COUNT);
+
+  const areasRaw = [...analysis.areaTotals.entries()]
     .map(([area, value]) => ({ area, value, share: share(value) }))
     .sort((a, b) => b.value - a.value);
-  const paths = analysis.hottest.slice(0, PATH_COUNT);
+  const areas = areasRaw.map((a) => ({ ...a, share: roundShare(a.share) }));
+  const paths = analysis.hottest.slice(0, PATH_COUNT).map((p) => ({ ...p, share: roundShare(p.share) }));
+
+  const { roots, rootsCut } = buildTopDown(analysis);
+  const topDown = roundTreeShares(roots);
 
   const handoffsByArea = groupHandoffsByArea(analysis);
-  const handoffs: HandoffEntry[] = areas
+  // Filtered on the RAW area share (areasRaw), same reasoning as bySelfRankedRaw above:
+  // HANDOFF_AREA_MIN_SHARE is a threshold, not a display value.
+  const handoffs: HandoffEntry[] = areasRaw
     .filter((a) => a.area !== "own" && a.share >= HANDOFF_AREA_MIN_SHARE)
     .map((a) => {
       const frames = (handoffsByArea.get(a.area) ?? []).slice(0, HANDOFF_FRAMES_PER_AREA).map((f) => ({
         key: f.key,
-        share: share(f.value),
+        share: roundShare(share(f.value)),
       }));
-      return { area: a.area, areaShare: a.share, frames };
+      return { area: a.area, areaShare: roundShare(a.share), frames };
     })
     .filter((h) => h.frames.length > 0);
 
@@ -189,16 +243,19 @@ export function buildSummary(analysis: ProfileAnalysis, profilePath: string): Su
 
   return {
     metric: analysis.metric,
+    unit: metricUnit(analysis.metric),
     total,
+    topDown,
+    topDownCut: rootsCut,
     areas,
     topSelf,
-    topSelfCut: Math.max(0, bySelf.length - SELF_COUNT),
+    topSelfCut,
     yourCodeByTotal,
-    yourCodeByTotalCut: Math.max(0, ownByTotal.length - OWN_TOTAL_COUNT),
+    yourCodeByTotalCut,
     handoffs,
     paths,
     note,
-    do: chooseDo(analysis, bySelfRanked, handoffsByArea, profilePath),
+    do: chooseDo(analysis, bySelfRankedRaw, handoffsByArea, profilePath),
   };
 }
 
@@ -216,6 +273,58 @@ export function formatPercent(share: number): string {
   return `${(share * 100).toFixed(1)}%`;
 }
 
+function labelTopDownNode(node: CallTreeNode): string {
+  if (node.isSelf) return "(self)";
+  return node.area === "own" ? node.key : `${node.area}: ${node.key}`;
+}
+
+/**
+ * Renders one root's own callee tree, depth-first - a "… N more" hint under a cut node points at
+ * THAT node's own key (`finderscope callees <profile> '<node>' -n <shown>`), not at the root, so
+ * an agent drilling into a deep hand-off gets a command that actually shows what was cut there.
+ * report/callees.ts's own renderNodes instead always names the one function `callees` was called
+ * on, which is correct there (there is only one anchor for the whole tree) but would be wrong
+ * here, where every node at every depth is its own possible drill-down target.
+ */
+function renderTopDownChildren(
+  nodes: CallTreeNode[],
+  childrenCut: number,
+  metric: Metric,
+  depth: number,
+  profilePath: string,
+  parentKey: string,
+  lines: string[],
+): void {
+  const indent = "  ".repeat(depth);
+  for (const node of nodes) {
+    lines.push(`  ${formatValue(metric, node.value).padStart(8)}  ${formatPercent(node.share).padStart(6)}  ${indent}${labelTopDownNode(node)}`);
+    renderTopDownChildren(node.children, node.childrenCut, metric, depth + 1, profilePath, node.key, lines);
+  }
+  if (childrenCut > 0) {
+    const shown = nodes.filter((n) => !n.isSelf).length + childrenCut;
+    lines.push(`  ${indent}… ${childrenCut} more (finderscope callees ${shQuote(profilePath)} ${shQuote(parentKey)} -n ${shown})`);
+  }
+}
+
+/**
+ * `finderscope top … --by root` (report/top.ts) ranks exactly these roots, flat - not
+ * `--area own --by total`, which ranks by a function's own `.total` and can leave a real root
+ * hidden behind a deeper own function that happens to hold more total time on its own (see
+ * top.ts's own comment on rootEntries()).
+ */
+function renderTopDown(data: SummaryData, profilePath: string, lines: string[]): void {
+  lines.push("");
+  lines.push("your code, top down:");
+  for (const root of data.topDown) {
+    lines.push(`  ${formatValue(data.metric, root.value).padStart(8)}  ${formatPercent(root.share).padStart(6)}  ${root.key}`);
+    renderTopDownChildren(root.children, root.childrenCut, data.metric, 1, profilePath, root.key, lines);
+  }
+  if (data.topDownCut > 0) {
+    const shown = data.topDown.length + data.topDownCut;
+    lines.push(`  … ${data.topDownCut} more (finderscope top ${shQuote(profilePath)} --by root -n ${shown})`);
+  }
+}
+
 export function formatSummaryText(data: SummaryData, profilePath: string): string {
   const lines: string[] = [];
   lines.push(`profile: ${profilePath}`);
@@ -229,6 +338,10 @@ export function formatSummaryText(data: SummaryData, profilePath: string): strin
     lines.push(`finderscope summary (bytes, total ${formatValue(data.metric, data.total)} still live when the process exited - not the peak)`);
   } else {
     lines.push(`finderscope summary (${data.metric}, total ${formatValue(data.metric, data.total)})`);
+  }
+
+  if (data.topDown.length > 0) {
+    renderTopDown(data, profilePath, lines);
   }
 
   lines.push("");
