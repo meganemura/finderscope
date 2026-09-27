@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.hegel/
+*.cpuprofile
+*.heapprofile
+!test/fixtures/**
+CLAUDE.local.md
+.claude-team/
+reports/
+.stryker-tmp/

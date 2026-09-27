@@ -1,0 +1,35 @@
+{
+  "name": "finderscope",
+  "version": "0.0.0",
+  "license": "MIT",
+  "author": "meganemura",
+  "type": "module",
+  "bin": {
+    "finderscope": "./dist/bin.js"
+  },
+  "files": [
+    "README.md",
+    "LICENSE",
+    "dist",
+    "docs"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "mutation": "stryker run",
+    "prepare": "npm run build"
+  },
+  "devDependencies": {
+    "@hegeldev/hegel": "0.4.5",
+    "@stryker-mutator/core": "10.0.0",
+    "@stryker-mutator/vitest-runner": "10.0.0",
+    "@types/node": "26.5.1",
+    "stryker-agent-reporter": "0.1.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "head": {
+    "id": 1,
+    "callFrame": {"functionName": "(root)", "url": "", "lineNumber": -1, "columnNumber": -1},
+    "selfSize": 0,
+    "children": [
+      {
+        "id": 2,
+        "callFrame": {"functionName": "allocateBuffers", "url": "file:///project/src/alloc.js", "lineNumber": 5, "columnNumber": 3},
+        "selfSize": 2048,
+        "children": [
+          {
+            "id": 3,
+            "callFrame": {"functionName": "helperAlloc", "url": "file:///project/node_modules/leftpad/index.js", "lineNumber": 2, "columnNumber": 1},
+            "selfSize": 6144,
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+}
