@@ -8,7 +8,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseCpuProfile } from "../src/profile/cpu.js";
-import { analyzeCpuProfile } from "../src/model.js";
+import { parseHeapProfile } from "../src/profile/heap.js";
+import { analyzeCpuProfile, analyzeHeapProfile } from "../src/model.js";
 import { resolveFunction } from "../src/query.js";
 import { buildSummary, formatSummaryText } from "../src/report/summary.js";
 
@@ -286,4 +287,45 @@ test("do: never targets a special frame - an all-idle profile falls back to the 
   const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
   const data = buildSummary(analysis, "profile.cpuprofile");
   assert.equal(data.do, "finderscope top 'profile.cpuprofile'");
+});
+
+// Regression: summary's own-self "prefer lines" rule (report/summary.ts) must gate on
+// analysis.lineSelfTimes.has(key), not merely on the own function's self share - otherwise a
+// profile that never had positionTicks at all still got pointed at a `lines` command whose only
+// real answer is a `note:`, not a next step. This own function alone holds 100% of self time
+// (well past the rule's 10% bar) with NO positionTicks anywhere in the profile, so the older
+// "point at its callers" rule must fire instead.
+test("do: never prefers lines when the profile has no positionTicks at all, even past the 10% bar", () => {
+  const json = profileWithFrames([
+    { functionName: "(root)", url: "" },
+    { functionName: "hot", url: "file:///project/src/a.js" },
+  ]);
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
+  assert.equal(analysis.lineSelfTimes.size, 0, "expected no positionTicks anywhere in this profile");
+  const data = buildSummary(analysis, "profile.cpuprofile");
+  assert.equal(data.do, "finderscope callers 'profile.cpuprofile' 'hot src/a.js:1:1'");
+});
+
+// Same gate, for a heap profile specifically: a .heapprofile never has a positionTicks concept at
+// all (profile/heap.ts's own node shape has no such field), so lineSelfTimes is always empty and
+// summary's `do:` must never suggest `lines` for one.
+test("do: never suggests lines for a heap profile", () => {
+  const json = {
+    head: {
+      id: 0,
+      callFrame: { functionName: "(root)", url: "", lineNumber: 0, columnNumber: 0 },
+      children: [
+        {
+          id: 1,
+          callFrame: { functionName: "alloc", url: "file:///project/src/a.js", lineNumber: 0, columnNumber: 0 },
+          selfSize: 1000,
+          children: [],
+        },
+      ],
+    },
+  };
+  const analysis = analyzeHeapProfile(parseHeapProfile(json), { root: "/project" });
+  assert.equal(analysis.lineSelfTimes.size, 0);
+  const data = buildSummary(analysis, "profile.heapprofile");
+  assert.doesNotMatch(data.do, /^finderscope lines /, `expected a heap profile's do: to never suggest lines, got: ${data.do}`);
 });

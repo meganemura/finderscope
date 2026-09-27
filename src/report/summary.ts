@@ -50,6 +50,13 @@ const PATH_COUNT = 3;
 const HANDOFF_AREA_MIN_SHARE = 0.05;
 const HANDOFF_FRAMES_PER_AREA = 3;
 const HANDOFF_DO_MIN_SHARE = 0.2;
+// Below the hand-off check (a real, concrete drill-down beats a general one) and above the plain
+// topSelf check below it, on purpose: once an own function holds a real slice of the whole
+// profile, "which of ITS lines" (design.md's `lines` verb, added for exactly this gap - a
+// function's self time that `callers`/`callees` could not split any further) is a more concrete
+// next step than "who calls it", even below the 20% bar chooseDo already uses elsewhere for "this
+// one function is worth understanding on its own".
+const OWN_SELF_LINES_MIN_SHARE = 0.1;
 
 /**
  * A special V8 frame's own key - "(root)", "(program)", "(idle)", "(garbage collector)" - is
@@ -169,6 +176,24 @@ function chooseDo(
     if (topHandoff !== undefined && share(topHandoff.value) >= HANDOFF_DO_MIN_SHARE) {
       return `finderscope callees ${shQuote(profilePath)} ${shQuote(topHandoff.key)}`;
     }
+  }
+
+  // The top OWN function by self time (not the top function overall - a package a hand-off
+  // already pointed past, above, is not this) crosses the "worth a line-by-line look" bar before
+  // the plain topSelf check below even gets a chance to fire for it - but only when `lines` would
+  // actually have something to say about it: a profile with no positionTicks at all (an older
+  // Node build, or a heap profile) or a function this profile happened to record none for would
+  // otherwise get pointed at a command whose only answer is a `note:`, not a real next step.
+  const topOwnSelf = [...analysis.functions.values()]
+    .filter((f) => f.area === "own")
+    .sort((a, b) => b.self - a.self)[0];
+  if (
+    topOwnSelf !== undefined &&
+    total > 0 &&
+    topOwnSelf.self / total >= OWN_SELF_LINES_MIN_SHARE &&
+    analysis.lineSelfTimes.has(topOwnSelf.key)
+  ) {
+    return `finderscope lines ${shQuote(profilePath)} ${shQuote(topOwnSelf.key)}`;
   }
 
   const topSelf = bySelf.find((f) => !isSpecialFrame(f.key));

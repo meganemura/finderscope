@@ -54,6 +54,23 @@ export interface ProfileAnalysis {
    *  groups these by area and applies its own display and `do:` thresholds. See
    *  computeHandoffs() below for why each contribution attributes to at most one pair. */
   handoffs: Handoff[];
+  /**
+   * Self time attributed to one source line inside a function, from V8's own `positionTicks`
+   * (see computeLineSelfTimes()) - function key -> "path:line" (the same display convention a
+   * function key's own path uses) -> time. Empty for every function when the profile carries no
+   * positionTicks at all (a heap profile, or a cpu profile from a Node build that never wrote
+   * them) - report/lines.ts treats that as "say so, not an error" (design.md), never as missing
+   * data to recompute.
+   */
+  lineSelfTimes: Map<string, Map<string, number>>;
+  /**
+   * "path:line" -> where to read that line's source text from, for report/lines.ts's "print the
+   * source when the file is readable" rule - present only when that position is a real file on
+   * disk (a mapped source that is itself a URL, or a special/native/wasm/eval frame with no real
+   * file, has no entry). First writer wins: every node producing the same "path:line" key names
+   * the same real file and line by construction (mapGeneratedLine's key IS that file and line).
+   */
+  lineReadPaths: Map<string, { path: string; line: number }>;
 }
 
 export interface AnalyzeOptions {
@@ -93,6 +110,9 @@ export interface GenericNode {
   id: number;
   parentId: number | undefined;
   frame: GenericFrame;
+  /** cpu-profile only (profile/cpu.ts); a heap profile's node never has this. See
+   *  computeLineSelfTimes()'s own comment for how this becomes report/lines.ts's per-line time. */
+  positionTicks?: { line: number; ticks: number }[];
 }
 
 export interface ClassifyResult {
@@ -261,6 +281,118 @@ export function classify(node: GenericNode, projectRoot: string, mapper: SourceM
   const { area, displayPath } = fromUrl ? classifyMappedSourceUrl(rawPath) : classifyPath(rawPath, projectRoot);
   const key = `${name} ${displayPath}:${outLine}:${outColumn}`;
   return { key, name, area };
+}
+
+export interface MappedLine {
+  /** Printed as `path:line` (design.md) - the same displayPath convention classify() uses for a
+   *  function's own definition position: project-relative under --root for "own", package-
+   *  relative for a node_modules dependency, a mapped source URL's own text unchanged, the raw
+   *  path otherwise. */
+  key: string;
+  /** Absolute filesystem path to read the source text from - undefined for a mapped source that
+   *  is itself a URL with no real file (webpack://...), or a special/native/wasm/eval frame with
+   *  no source position at all; report/lines.ts's "when the file is readable" rule reads this,
+   *  not `key` (a scheme URL in `key` is never openable as a path). */
+  readablePath: string | undefined;
+  /** 1-based - the mapped original line when a source map applies, the generated script's own
+   *  line otherwise. Matches `readablePath`: the line to read FROM that file. */
+  line: number;
+}
+
+/**
+ * Maps one positionTicks entry - a node's own script url plus a 1-based GENERATED line (V8's own
+ * positionTicks convention, unlike callFrame's 0-based lineNumber classify() reads) - to what
+ * report/lines.ts prints and, when readable, reads. Column is unknown (positionTicks carries
+ * none), so this uses SourceMapper.mapLine - the FIRST segment recorded for that generated line,
+ * whatever its own column - not `map(url, line, 0)`: a real compiler indents its output (tsc's
+ * own --sourceMap routinely starts an indented line's first segment at column 2, 4, ...), so a
+ * line with no segment AT column 0 made `map(url, line, 0)` return undefined and this whole
+ * function silently fall back to the unmapped generated position instead - see sourcemap.ts's own
+ * comment on mapLine for the fixture (test/fixtures/mapped-source's indented `hotFunction` body)
+ * that caught this. Shares classify()'s own mapped-vs-unmapped and scheme-vs-real-file branches on
+ * purpose - two independent implementations of "how does a generated position become a path an
+ * agent can open" would drift.
+ */
+export function mapGeneratedLine(url: string, generatedLine: number, projectRoot: string, mapper: SourceMapper): MappedLine {
+  if (!isFileUrl(url)) {
+    // node:, wasm:, eval, empty (native) - no real generated source position to map or read;
+    // still printed, so a caller can see where V8 attributed the ticks, just never as a readable
+    // path.
+    const label = url === "" ? "(native)" : url;
+    return { key: `${label}:${generatedLine}`, readablePath: undefined, line: generatedLine };
+  }
+
+  const mapped = mapper.mapLine(url, generatedLine - 1);
+  if (mapped !== undefined) {
+    const outLine = mapped.line + 1;
+    if (hasScheme(mapped.source)) {
+      return { key: `${mapped.source}:${outLine}`, readablePath: undefined, line: outLine };
+    }
+    return { key: `${classifyPath(mapped.source, projectRoot).displayPath}:${outLine}`, readablePath: mapped.source, line: outLine };
+  }
+
+  const rawPath = localize(url);
+  return { key: `${classifyPath(rawPath, projectRoot).displayPath}:${generatedLine}`, readablePath: rawPath, line: generatedLine };
+}
+
+/**
+ * Splits one node's own self time across the lines its positionTicks named, so every line's share
+ * sums back to EXACTLY that self time (integer microseconds in, integer microseconds out, no
+ * rounding drift) - the largest-remainder method (Hamilton's apportionment): floor each line's
+ * raw share first, then hand the leftover units, one each, to the lines with the largest dropped
+ * fraction, largest first. A naive per-line Math.round() has no such guarantee (every line can
+ * round down, or up, independently) - this codebase already solved the identical problem for
+ * sampleTimes' own last-sample time (profile/cpu.ts's medianLower comment); this is the same
+ * exactness requirement one level down, applied to positionTicks instead of timeDeltas.
+ */
+function apportionTicks(value: number, ticks: number[]): number[] {
+  const totalTicks = ticks.reduce((a, b) => a + b, 0);
+  if (totalTicks <= 0) return ticks.map(() => 0);
+  const raw = ticks.map((t) => (value * t) / totalTicks);
+  const floors = raw.map(Math.floor);
+  const allocated = floors.reduce((a, b) => a + b, 0);
+  const remainder = value - allocated;
+  const byFraction = raw
+    .map((r, i) => ({ i, fraction: r - floors[i]! }))
+    .sort((a, b) => b.fraction - a.fraction);
+  const result = [...floors];
+  for (let k = 0; k < remainder; k++) result[byFraction[k]!.i]! += 1;
+  return result;
+}
+
+/**
+ * Builds ProfileAnalysis.lineSelfTimes/lineReadPaths: for every contribution whose OWN node
+ * carries positionTicks with a positive tick total, apportions that contribution's value
+ * (apportionTicks) across its lines and adds each into the OWNING FUNCTION's line map (several
+ * nodes - recursion, or two call sites reaching the same source position - can share one function
+ * key, and their line times add). A contribution whose node has no positionTicks (or an all-zero
+ * one) contributes nothing here at all - excluded, not zero-filled - which is why summing this
+ * map's values for a function can be LESS than that function's own self time; report/lines.ts
+ * never claims otherwise, and the Hegel property test states the same exclusion.
+ */
+function computeLineSelfTimes(
+  contribution: { nodeId: number; value: number },
+  own: ClassifyResult,
+  node: GenericNode,
+  projectRoot: string,
+  mapper: SourceMapper,
+  lineSelfTimes: Map<string, Map<string, number>>,
+  lineReadPaths: Map<string, { path: string; line: number }>,
+): void {
+  const ticks = node.positionTicks;
+  if (ticks === undefined || ticks.length === 0) return;
+  const shares = apportionTicks(contribution.value, ticks.map((t) => t.ticks));
+  const perFunction = lineSelfTimes.get(own.key) ?? new Map<string, number>();
+  for (let i = 0; i < ticks.length; i++) {
+    const share = shares[i]!;
+    if (share <= 0) continue;
+    const mapped = mapGeneratedLine(node.frame.url, ticks[i]!.line, projectRoot, mapper);
+    perFunction.set(mapped.key, (perFunction.get(mapped.key) ?? 0) + share);
+    if (mapped.readablePath !== undefined && !lineReadPaths.has(mapped.key)) {
+      lineReadPaths.set(mapped.key, { path: mapped.readablePath, line: mapped.line });
+    }
+  }
+  if (perFunction.size > 0) lineSelfTimes.set(own.key, perFunction);
 }
 
 function buildNodeInfo(nodes: Map<number, GenericNode>, projectRoot: string, mapper: SourceMapper): Map<number, ClassifyResult> {
@@ -634,6 +766,9 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
     return fn;
   }
 
+  const lineSelfTimes = new Map<string, Map<string, number>>();
+  const lineReadPaths = new Map<string, { path: string; line: number }>();
+
   const paths: { keys: string[]; value: number }[] = [];
   for (const contribution of input.contributions) {
     if (contribution.value <= 0) continue;
@@ -641,6 +776,7 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
     const selfFn = ensure(own.key);
     selfFn.self += contribution.value;
     areaTotals.set(own.area, (areaTotals.get(own.area) ?? 0) + contribution.value);
+    computeLineSelfTimes(contribution, own, input.nodes.get(contribution.nodeId)!, input.root, mapper, lineSelfTimes, lineReadPaths);
 
     for (const key of pathKeysOf(input.nodes, info, contribution.nodeId)) {
       ensure(key).total += contribution.value;
@@ -656,7 +792,7 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
   const hottest = groupKeyPaths(paths, areaOf, input.total, foldAroundOwnFrames).slice(0, input.hottestPathCount);
   const handoffs = computeHandoffs(paths, areaOf);
 
-  return { metric: input.metric, total: input.total, functions, areaTotals, hottest, paths, handoffs };
+  return { metric: input.metric, total: input.total, functions, areaTotals, hottest, paths, handoffs, lineSelfTimes, lineReadPaths };
 }
 
 /**

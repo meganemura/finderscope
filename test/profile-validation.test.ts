@@ -107,6 +107,30 @@ test("an empty (but well-shaped) profile parses without error", () => {
   assert.equal(profile.totalDuration, 0);
 });
 
+test("a negative positionTicks.ticks is a ProfileShapeError", () => {
+  const json = {
+    nodes: [
+      { id: 1, callFrame: { functionName: "(root)", url: "" }, children: [2] },
+      { id: 2, callFrame: { functionName: "f", url: "/a/x.js" }, children: [], positionTicks: [{ line: 3, ticks: -1 }] },
+    ],
+    samples: [2],
+    timeDeltas: [0],
+  };
+  assertShapeError(() => parseCpuProfile(json), /node 2's positionTicks has a non-integer or negative ticks value \(got -1\)/);
+});
+
+test("a non-integer positionTicks.ticks is a ProfileShapeError", () => {
+  const json = {
+    nodes: [
+      { id: 1, callFrame: { functionName: "(root)", url: "" }, children: [2] },
+      { id: 2, callFrame: { functionName: "f", url: "/a/x.js" }, children: [], positionTicks: [{ line: 3, ticks: 1.5 }] },
+    ],
+    samples: [2],
+    timeDeltas: [0],
+  };
+  assertShapeError(() => parseCpuProfile(json), /node 2's positionTicks has a non-integer or negative ticks value \(got 1\.5\)/);
+});
+
 test("a non-finite selfSize on a heap node is a ProfileShapeError", () => {
   const json = { head: { id: 1, callFrame: { functionName: "(root)", url: "" }, selfSize: "not a number", children: [] } };
   assertShapeError(() => parseHeapProfile(json), /node 1's selfSize is not a finite number/);

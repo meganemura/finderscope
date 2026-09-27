@@ -17,6 +17,7 @@ finderscope <profile> [--root dir] [--json]
 finderscope top <profile> [--by self|total|root] [--area <area>] [-n N] [--json]
 finderscope callers <profile> <function> [--expand] [--paths] [-n N] [--json]
 finderscope callees <profile> <function> [--expand] [--paths] [-n N] [--json]
+finderscope lines <profile> <function> [-n N] [--json]
 finderscope diff <before> <after> [-n N] [--json]
 finderscope run [--heap] [--root dir] -- <command...>
 ```

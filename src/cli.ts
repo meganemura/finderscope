@@ -21,6 +21,7 @@ import { buildTop, formatTopText, type TopOptions } from "./report/top.js";
 import { buildCallersPaths, buildCallersTree, formatCallersPathsText, formatCallersTreeText } from "./report/callers.js";
 import { buildCalleesPaths, buildCalleesTree, formatCalleesPathsText, formatCalleesTreeText } from "./report/callees.js";
 import { buildDiff, formatDiffText } from "./report/diff.js";
+import { buildLines, formatLinesText } from "./report/lines.js";
 import { shQuote } from "./report/summary.js";
 import { runCommand } from "./run.js";
 
@@ -246,14 +247,14 @@ export function noProfileWarning(signal: NodeJS.Signals | null): { message: stri
 }
 
 const USAGE =
-  "usage: finderscope '<profile>' | top '<profile>' | callers '<profile>' '<fn>' [--expand] [--paths] | callees '<profile>' '<fn>' [--expand] [--paths] | diff '<before>' '<after>' | run [--heap] -- '<command...>'";
+  "usage: finderscope '<profile>' | top '<profile>' | callers '<profile>' '<fn>' [--expand] [--paths] | callees '<profile>' '<fn>' [--expand] [--paths] | lines '<profile>' '<fn>' | diff '<before>' '<after>' | run [--heap] -- '<command...>'";
 
 async function dispatch(argv: string[], io: Io): Promise<number> {
   if (argv.length === 0) {
     throw new CliError("no command or profile given", USAGE);
   }
 
-  const KNOWN_SUBCOMMANDS = new Set(["top", "callers", "callees", "diff", "run"]);
+  const KNOWN_SUBCOMMANDS = new Set(["top", "callers", "callees", "lines", "diff", "run"]);
   const first = argv[0]!;
   const subcommand = KNOWN_SUBCOMMANDS.has(first) ? first : "summary";
   const rest = subcommand === "summary" ? argv : argv.slice(1);
@@ -327,6 +328,26 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
             io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatCalleesTreeText(data, profilePath)}\n`);
           }
         }
+        return 0;
+      });
+    }
+
+    case "lines": {
+      const profilePath = positionals[0];
+      const query = positionals[1];
+      if (profilePath === undefined || query === undefined) {
+        throw new CliError("need a profile and a function", `finderscope lines '<profile>' '<function>'`);
+      }
+      checkKnownOptions(options, new Set(["json", "root", "n"]), `finderscope lines ${shQuote(profilePath)} ${shQuote(query)}`);
+      const n = parsePositiveInt(
+        optionString(options, "n"),
+        `finderscope lines ${shQuote(profilePath)} ${shQuote(query)} -n '<positive integer>'`,
+      );
+      return attributeUnexpectedErrorsTo([profilePath], () => {
+        const analysis = loadAnalysis(profilePath, root);
+        const fn = resolveFunction(analysis, query, `finderscope top ${shQuote(profilePath)}`);
+        const data = buildLines(analysis, fn, profilePath, n);
+        io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatLinesText(data, profilePath)}\n`);
         return 0;
       });
     }

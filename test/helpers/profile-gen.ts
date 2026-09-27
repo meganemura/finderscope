@@ -36,24 +36,44 @@ export const FRAME_POOL = [
 ];
 
 /**
+ * V8's own per-line tick counts (see profile/cpu.ts's own comment on the 1-based-in-the-generated-
+ * script convention) - drawn with a mix of a real tick total (>0, so a node contributes to
+ * model.ts's lineSelfTimes) and an all-zero one (a node that has a positionTicks array but
+ * nothing in it, which model.ts must still exclude the same as "no array at all") - the exclusion
+ * test/lines.property.test.ts checks needs both shapes to actually occur.
+ */
+function drawPositionTicks(tc: TestCase): { line: number; ticks: number }[] {
+  const count = tc.draw(gs.integers({ minValue: 1, maxValue: 4 }));
+  const ticks: { line: number; ticks: number }[] = [];
+  for (let i = 0; i < count; i++) {
+    ticks.push({ line: tc.draw(gs.integers({ minValue: 1, maxValue: 20 })), ticks: tc.draw(gs.integers({ minValue: 0, maxValue: 50 })) });
+  }
+  return ticks;
+}
+
+/**
  * Builds a random valid call tree (node i>0's parent is some earlier node) plus a random
  * samples/timeDeltas pair over it, as the raw JSON shape profile/cpu.ts parses. Node 0 is always
  * "(root)", matching every real profile's own shape (and letting a property test actually
  * exercise the "(root) is always dropped first" fold rule, not just a coincidence of the pool).
  * timeDeltas include negative integers - a real clock adjustment - deliberately, so a property
  * that held only because every generated delta happened to be nonnegative would fail here instead
- * of in a real profile.
+ * of in a real profile. `withPositionTicks` attaches a random positionTicks array (drawPositionTicks)
+ * to a random subset of non-root nodes - off by default, so every existing caller of this
+ * function keeps generating exactly the profiles it always has.
  */
-export function drawCpuProfileJson(tc: TestCase, maxNodes = 12, maxSamples = 20): unknown {
+export function drawCpuProfileJson(tc: TestCase, maxNodes = 12, maxSamples = 20, options: { withPositionTicks?: boolean } = {}): unknown {
   const nodeCount = tc.draw(gs.integers({ minValue: 1, maxValue: maxNodes }));
   const nodes: unknown[] = [];
   for (let id = 0; id < nodeCount; id++) {
     const frame = id === 0 ? { functionName: "(root)", url: "" } : tc.draw(gs.sampledFrom(FRAME_POOL));
     const children: number[] = [];
+    const positionTicks = options.withPositionTicks && id > 0 && tc.draw(gs.booleans()) ? drawPositionTicks(tc) : undefined;
     nodes.push({
       id,
       callFrame: { functionName: frame.functionName, url: frame.url, lineNumber: 0, columnNumber: 0 },
       children,
+      ...(positionTicks !== undefined ? { positionTicks } : {}),
     });
     if (id > 0) {
       const parentId = tc.draw(gs.integers({ minValue: 0, maxValue: id - 1 }));

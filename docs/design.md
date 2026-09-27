@@ -35,6 +35,7 @@ profiled program.
 | `finderscope top <profile> [--by self\|total\|root] [--area <area>] [-n N]` | A longer ranked list - `--by root` ranks "your code, top down"'s own roots. |
 | `finderscope callers <profile> <function>` | Which call paths lead to the function, with each path's share. |
 | `finderscope callees <profile> <function>` | Where the function's own total time goes. |
+| `finderscope lines <profile> <function>` | The hot lines inside the function's own body, from V8's own per-line sample counts. |
 | `finderscope diff <before> <after>` | The functions and areas whose share changed most, sorted by the size of the change. |
 | `finderscope run [--heap] -- <command...>` | Runs the command with `--cpu-prof` (and `--heap-prof`) in a scratch directory, then prints the summary for each profile it wrote. |
 
@@ -88,6 +89,64 @@ before it prints anything else for exactly that reason.
   `native` (an empty url - a V8 builtin with no source position at all).
 - Self time is the time of the samples whose top frame is the function. Total time is the time of the
   samples whose stack contains the function at least once, so recursion is not counted twice.
+- A function's own self time can be all `callers`/`callees` ever say about it: neither one splits a
+  function's self time any further, so a function that holds a real share of the whole profile as
+  its own self time - and stays that way after reading its callers and callees - leaves an agent
+  with a single number and no next step. `finderscope lines <profile> <function>` is that next
+  step: a `.cpuprofile` node may carry V8's own `positionTicks`, an array of
+  `{ line, ticks }` - a sample count for one source line inside that node's own function, line
+  1-based and in the GENERATED script (unlike a call frame's own 0-based `lineNumber`). `lines`
+  merges every node classified under the same function key, and turns each node's own ticks into
+  time by that node's own share: `self(node) * ticks(line) / sum(ticks(node))` - a node's ticks,
+  not the function's, because two nodes reaching the same function (recursion, or two call sites)
+  routinely spent their samples in different lines of it. Every generated line is mapped back
+  through a source map exactly the way every other verb maps a position (a `.ts` line, not a
+  compiled `.js` one, when a map applies) - except for the COLUMN: positionTicks names a line only,
+  never a column, so this uses the source mapper's own `mapLine`, the FIRST segment recorded for
+  that generated line, whatever its own column - not "the segment at column 0". A real compiler
+  indents its output (tsc's own `--sourceMap` routinely starts an indented line's first segment at
+  column 2, 4, ...), so "at column 0" found nothing there and every indented line - most of a real
+  function's own body - silently fell back to the unmapped, compiled position instead; test/
+  fixtures/mapped-source's own `hotFunction` (an indented loop body, compiled with real `tsc`) is
+  the regression test for this. Ticks apportion to lines by the largest-remainder method
+  (Hamilton's apportionment - floor each line's raw share, then hand the leftover microseconds, one
+  each, to the lines with the largest dropped fraction), the same integer-exactness rule this
+  design already applies to a profile's last sample time (see "Scope" above on `timeDeltas`) - so a
+  function's per-line times always sum to exactly its own self time, never drifting from float
+  rounding. A node with no `positionTicks` at all, or an all-zero one, is excluded from that sum
+  rather than folded in as zero - `lines` never claims a line's time it does not actually have.
+  When NO node in the whole profile carries `positionTicks` (an older Node build, or a
+  `.heapprofile`, which never has them at all), `lines` says so in one line and falls back to
+  `callees` - a fact about the profile, never an error.
+  `lines` ranks by self time: each row shows time, the line's share of the FUNCTION's own self time,
+  its share of the profile total, and `path:line`; it also prints the line's own source text,
+  trimmed to about 100 characters, when the named file is still readable on disk - the mapped
+  original file for a mapped position, the generated script otherwise. That named file is untrusted
+  input (a source map's own `sources` entry can name anything at all, not necessarily real source),
+  so a preview is only ever read from an ordinary, regular file (never a FIFO, a device such as
+  `/dev/zero`, or a socket - `stat` alone decides this and never blocks, unlike a `read` of one of
+  those) of at most 5MB (a minified bundle can be megabytes long, not worth reading whole for one
+  line), and only under a real code extension (`.js` `.mjs` `.cjs` `.jsx` `.ts` `.mts` `.cts`
+  `.tsx` `.vue` `.svelte` `.astro`) - so a map naming, say, `~/.ssh/id_rsa` never gets that file's
+  first line printed as a "preview". Failing any of those checks is silent, the same as a plain
+  unreadable file: no `source` on that row, never an error. Its own `do:` prefers the same verb
+  again: once a function's self time is a real share of the profile (>= 20%, the same bar the
+  summary's own `do:` uses elsewhere for "this one function is worth understanding on its own"),
+  the next useful question is the SAME one about the next heaviest own function by self time - not
+  a different verb - so `do:` suggests `lines` for it, but only when that next function itself
+  holds at least 1% of the total; below THAT bar it is not worth a whole extra round trip either,
+  and `do:` falls back to `callees` on the current function instead. Below the 20% bar in the first
+  place, this function's own lines are not yet the interesting question - `do:` suggests `callees`
+  instead, to find where the time actually goes. The summary's own `do:` rule gained one more step
+  for the same reason: when the top OWN function by self time holds at least 10% of the profile
+  total AND this profile actually has positionTicks recorded for it, summary's `do:` prefers `lines`
+  for it too, ahead of the older "point at its callers" rule - once an own function is provably
+  worth reading, "which of its lines" is the more concrete next step than "who calls it", and
+  finding that out no longer needs a whole extra command's round trip once positionTicks already
+  answered it. The positionTicks check matters: without it, a profile with no per-line data at all
+  (an older Node build, or - since this rule reads the OWN function regardless of metric - a heap
+  profile, which never has positionTicks at all) would get pointed at a `lines` command whose only
+  real answer is a `note:`, not a next step.
 - Output has a budget. Each list has a default length. A line that was cut says how many entries
   were left out, and which command shows them.
 - The last line is always `do:` with the next command, chosen from the data. An example: when one
@@ -196,6 +255,30 @@ own `topDownCut` hint names, so a root "your code, top down" had to cut still sh
 }
 ```
 
+`finderscope lines <profile> <fn> --json` (ranked by self time; `key` is already mapped through a
+source map when one applies, exactly like every other function key; `source` is present only when
+the named file was still readable on disk):
+```json
+{
+  "metric": "time", "unit": "us", "function": "main src/main.js:10:3", "self": 4400, "total": 5400,
+  "lines": [
+    { "key": "src/main.js:12", "value": 3000, "selfShare": 0.682, "totalShare": 0.556, "source": "const total = items.reduce((sum, item) => sum + item.value, 0);" },
+    ...
+  ],
+  "cut": 0,
+  "do": "finderscope callees '<profile>' 'main src/main.js:10:3'"
+}
+```
+When the profile carries no `positionTicks` at all, or none for this function, `lines`/`cut` are
+`[]`/`0` and a `note` field (a fact, never an error - see the tick-to-time rule above) replaces
+them:
+```json
+{ "metric": "time", "unit": "us", "function": "main src/main.js:10:3", "self": 4400, "total": 5400,
+  "lines": [], "cut": 0,
+  "note": "this profile has no positionTicks at all - an older Node build, or a .heapprofile, never carries per-line tick data",
+  "do": "finderscope callees '<profile>' 'main src/main.js:10:3'" }
+```
+
 `finderscope diff <before> <after> --json` (`beforeShare`/`afterShare`/`delta` are shares, not a
 value in `unit` - a diff has no single before/after value to report per row, only how its share of
 each profile's own total changed):
@@ -240,6 +323,10 @@ These are properties, tested with generated profiles:
 - The area totals sum to the profile's total.
 - `diff` of a profile with itself reports no change.
 - Mapping a position through a source map that the test generated returns the original position.
+- `lines`' per-line times for one function sum to exactly the self time of the nodes that carried
+  positionTicks - a node with none, or an all-zero array, is excluded from that sum, never
+  zero-filled into it. Within one node, each line's own time is within ±1 microsecond of
+  `self(node) * ticks(line) / ticks(node)` - the largest-remainder apportionment's own error bound.
 - In "your code, top down", each root's `(self)` value plus the sum of its own direct children's
   values equals that root's own value - the same invariant `callees` already holds, recursively,
   at every expanded node beneath it.

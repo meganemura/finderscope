@@ -20,6 +20,13 @@ export interface CpuNode {
   frame: CpuFrame;
   parentId: number | undefined;
   childIds: number[];
+  /** V8's own per-line sample counts inside this node's function, when the profiler wrote them -
+   *  an older Node, or a profile V8 wrote without --detailed-line-info (`positionTicks` is not
+   *  guaranteed on every build), leaves this undefined. `line` is 1-based, in the GENERATED
+   *  script - unlike callFrame's own 0-based lineNumber - because that is what V8 itself writes;
+   *  model.ts's report/lines.ts converts it the same way classify() converts callFrame's line, so
+   *  a caller never sees the two conventions mixed. */
+  positionTicks: { line: number; ticks: number }[] | undefined;
 }
 
 export interface NormalizedCpuProfile {
@@ -50,11 +57,42 @@ interface RawCallFrame {
   columnNumber?: unknown;
 }
 
+interface RawPositionTick {
+  line?: unknown;
+  ticks?: unknown;
+}
+
 interface RawCpuNode {
   id?: unknown;
   callFrame?: RawCallFrame;
   children?: unknown;
   parent?: unknown;
+  positionTicks?: unknown;
+}
+
+/**
+ * An entry missing line/ticks entirely, or carrying a non-number one, is dropped rather than
+ * rejecting the whole profile - positionTicks is optional data lines.ts treats as absent, not a
+ * shape a cpuprofile is validated against the way nodes/samples/timeDeltas are. A negative or
+ * non-integer `ticks`, though, is not a shape mismatch to shrug off the same way: a real V8 tick
+ * count is always a nonnegative integer, so one that isn't means the file itself is corrupt in a
+ * way model.ts's apportionTicks (largest-remainder over an integer self time) has no correct
+ * answer for - a negative or fractional tick count would apportion a NEGATIVE or fractional share
+ * of a line's self time, silently breaking the "per-line times sum to exactly self time" invariant
+ * report/lines.ts and its own Hegel property test rely on. That is worth failing the whole
+ * profile for, the same as a malformed nodes/samples/timeDeltas shape.
+ */
+function parsePositionTicks(raw: unknown, nodeId: number): { line: number; ticks: number }[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const result: { line: number; ticks: number }[] = [];
+  for (const entry of raw as RawPositionTick[]) {
+    if (typeof entry?.line !== "number" || typeof entry?.ticks !== "number") continue;
+    if (!Number.isInteger(entry.ticks) || entry.ticks < 0) {
+      throw new ProfileShapeError(`node ${nodeId}'s positionTicks has a non-integer or negative ticks value (got ${JSON.stringify(entry.ticks)})`);
+    }
+    result.push({ line: entry.line, ticks: entry.ticks });
+  }
+  return result.length > 0 ? result : undefined;
 }
 
 interface RawCpuProfile {
@@ -115,7 +153,7 @@ export function parseCpuProfile(json: unknown): NormalizedCpuProfile {
       line: typeof callFrame.lineNumber === "number" ? callFrame.lineNumber : 0,
       column: typeof callFrame.columnNumber === "number" ? callFrame.columnNumber : 0,
     };
-    nodes.set(id, { id, frame, parentId: undefined, childIds: [] });
+    nodes.set(id, { id, frame, parentId: undefined, childIds: [], positionTicks: parsePositionTicks(rawNode.positionTicks, id) });
   }
 
   // Two shapes exist in the wild: `children: number[]` on each node (node --cpu-prof, and most

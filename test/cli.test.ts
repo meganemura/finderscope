@@ -20,6 +20,9 @@ const WIDE_FIXTURE = "test/fixtures/wide.cpuprofile";
 // deep chain fill every slot of a small -n before smallRoot's own (smaller) total ever gets a
 // turn, even though smallRoot is a real, distinct root "your code, top down" always shows.
 const DEEP_ROOT_FIXTURE = "test/fixtures/deep-root.cpuprofile";
+// One own function ("main") with a real positionTicks array - test/lines.test.ts covers `lines`'s
+// exact text/JSON in full; this file only needs its do:/note: lines fed into allOutputs below.
+const LINES_FIXTURE = "test/fixtures/lines.cpuprofile";
 const ROOT = ["--root", "/project"];
 
 // Every stdout write from every capture() in this file lands here too, so one final test (at the
@@ -492,6 +495,31 @@ describe("errors", () => {
       out.join(""),
       "error: cannot diff a time profile against a bytes profile\ndo: pass two .cpuprofile files or two .heapprofile files\n",
     );
+  });
+});
+
+describe("finderscope lines", () => {
+  // Full exact text/JSON coverage lives in test/lines.test.ts; this only needs to feed the new
+  // verb's do:/note: lines into allOutputs so the sh -n check at the bottom of this file covers it.
+  test("text and json both end with a runnable do:", async () => {
+    const text = capture();
+    const code = await main(["lines", LINES_FIXTURE, "main", ...ROOT], text.io);
+    assert.equal(code, 0);
+    assert.match(text.out.join(""), /\ndo: finderscope callees /);
+
+    const json = capture();
+    await main(["lines", LINES_FIXTURE, "main", ...ROOT, "--json"], json.io);
+    const data = JSON.parse(json.out.join(""));
+    assert.equal(data.unit, "us");
+    assert.equal(data.lines.length, 2);
+  });
+
+  test("no positionTicks at all: a note:, not an error, still ends with do:", async () => {
+    const { io, out } = capture();
+    const code = await main(["lines", CPU_FIXTURE, "main", ...ROOT], io);
+    assert.equal(code, 0);
+    assert.match(out.join(""), /^note: /m);
+    assert.match(out.join(""), /\ndo: finderscope callees /);
   });
 });
 

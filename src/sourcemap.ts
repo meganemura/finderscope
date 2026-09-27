@@ -244,24 +244,47 @@ function loadMapForScript(scriptPath: string): DecodedMap | undefined {
 
 export interface SourceMapper {
   map(url: string, line: number, column: number): SourcePosition | undefined;
+  /**
+   * The mapping for a whole generated LINE, not one column - the FIRST segment recorded for that
+   * line, whatever column it itself starts at. positionTicks (model.ts's mapGeneratedLine) names
+   * only a line, never a column, and `map(url, line, 0)` is the wrong stand-in for that: a real
+   * compiler indents its output (tsc's own `--sourceMap` routinely starts a line's first segment
+   * at column 2, 4, ...), so a line with nothing recorded AT column 0 made `map(url, line, 0)`
+   * return undefined - a bug caught by the exact case profiling test/fixtures/mapped-source's
+   * `hotFunction` (its own body is indented) exercises. `mapLine` never has that failure mode: it
+   * takes whichever segment is first on the line, column irrelevant.
+   */
+  mapLine(url: string, line: number): SourcePosition | undefined;
+}
+
+/** Builds the returned SourcePosition from one segment, shared by map() and mapLine() - both
+ *  agree on when a segment is usable (a real sourceIndex/sourceLine/sourceColumn) and how a name
+ *  index resolves, so a fix to one can never silently drift from the other. */
+function segmentToPosition(decoded: DecodedMap, candidate: Segment | undefined): SourcePosition | undefined {
+  if (candidate === undefined || candidate.sourceIndex === undefined) return undefined;
+  const source = decoded.sources[candidate.sourceIndex];
+  if (source === undefined || candidate.sourceLine === undefined || candidate.sourceColumn === undefined) {
+    return undefined;
+  }
+  const name = candidate.nameIndex !== undefined ? decoded.names[candidate.nameIndex] : undefined;
+  return { source, line: candidate.sourceLine, column: candidate.sourceColumn, name };
 }
 
 /** One mapper instance caches every script it has looked at; reuse it across a whole profile. */
 export function createSourceMapper(): SourceMapper {
   const cache = new Map<string, DecodedMap | undefined>();
 
+  function getDecoded(url: string): DecodedMap | undefined {
+    if (cache.has(url)) return cache.get(url);
+    const decoded = loadMapForScript(urlToPath(url));
+    cache.set(url, decoded);
+    return decoded;
+  }
+
   return {
     map(url: string, line: number, column: number): SourcePosition | undefined {
       if (!isLocalFileUrl(url)) return undefined;
-
-      let decoded: DecodedMap | undefined;
-      if (cache.has(url)) {
-        decoded = cache.get(url);
-      } else {
-        const path = urlToPath(url);
-        decoded = loadMapForScript(path);
-        cache.set(url, decoded);
-      }
+      const decoded = getDecoded(url);
       if (decoded === undefined) return undefined;
 
       const segments = decoded.lines[line];
@@ -274,15 +297,24 @@ export function createSourceMapper(): SourceMapper {
         if (segment.generatedColumn > column) break;
         candidate = segment;
       }
-      if (candidate === undefined || candidate.sourceIndex === undefined) return undefined;
+      return segmentToPosition(decoded, candidate);
+    },
 
-      const source = decoded.sources[candidate.sourceIndex];
-      if (source === undefined || candidate.sourceLine === undefined || candidate.sourceColumn === undefined) {
-        return undefined;
+    mapLine(url: string, line: number): SourcePosition | undefined {
+      if (!isLocalFileUrl(url)) return undefined;
+      const decoded = getDecoded(url);
+      if (decoded === undefined) return undefined;
+
+      const segments = decoded.lines[line];
+      if (segments === undefined || segments.length === 0) return undefined;
+      // Segments are sorted by generatedColumn ascending (decodeMappings). Take the first one that
+      // maps somewhere, whatever its column: a 1-field segment is legal and marks an unmapped span,
+      // so the line's first segment alone can miss a mapped token later on the same line.
+      for (const segment of segments) {
+        const position = segmentToPosition(decoded, segment);
+        if (position !== undefined) return position;
       }
-      const name = candidate.nameIndex !== undefined ? decoded.names[candidate.nameIndex] : undefined;
-
-      return { source, line: candidate.sourceLine, column: candidate.sourceColumn, name };
+      return undefined;
     },
   };
 }
