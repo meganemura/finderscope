@@ -1,5 +1,8 @@
 # finderscope design
 
+See [releasing.md](releasing.md) for the release process and [maintenance.md](maintenance.md) for
+maintenance work.
+
 ## What it is
 
 finderscope turns a V8 profile into a short report that a coding agent can read in one pass.

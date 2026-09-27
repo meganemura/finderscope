@@ -1,14 +1,33 @@
 {
   "name": "finderscope",
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Turn V8 CPU and heap profiles into short, ranked reports with runnable next commands for coding agents.",
+  "keywords": [
+    "profiling",
+    "cpuprofile",
+    "heapprofile",
+    "v8",
+    "coding-agents",
+    "performance"
+  ],
   "license": "MIT",
   "author": "meganemura",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/meganemura/finderscope.git"
+  },
+  "homepage": "https://github.com/meganemura/finderscope#readme",
+  "bugs": {
+    "url": "https://github.com/meganemura/finderscope/issues"
+  },
   "type": "module",
   "bin": {
     "finderscope": "./dist/bin.js"
   },
   "files": [
     "README.md",
+    "README.ja.md",
+    "CHANGELOG.md",
     "LICENSE",
     "dist",
     "docs",
@@ -22,7 +41,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "mutation": "stryker run",
-    "prepare": "npm run build"
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build && npm run typecheck && npm test"
   },
   "devDependencies": {
     "@hegeldev/hegel": "0.4.5",

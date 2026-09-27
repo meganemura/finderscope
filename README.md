@@ -1,4 +1,6 @@
-# finderscope
+# 🔭 finderscope
+
+[![npm version](https://img.shields.io/npm/v/finderscope?logo=npm)](https://www.npmjs.com/package/finderscope)
 
 finderscope turns a V8 profile (`.cpuprofile`, `.heapprofile`) into a short, ranked report a
 coding agent can read in one pass, then names the next command to run. See
@@ -20,7 +22,7 @@ finderscope callers <profile> <function> [--expand] [--paths] [--from ms --to ms
 finderscope callees <profile> <function> [--expand] [--paths] [--from ms --to ms] [-n N] [--json]
 finderscope lines <profile> <function> [--from ms --to ms] [-n N] [--json]
 finderscope diff <before> <after> [-n N] [--json]
-finderscope run [--heap] [--heap-peak] [--root dir] -- <command...>
+finderscope run [--heap] [--heap-peak] [--root dir] [--json] -- <command...>
 finderscope timeline <profile> [--json]
 finderscope --help | -h | help
 ```
@@ -109,3 +111,7 @@ internal keeps its full specifier, and three frame shapes have no real file and 
 `:1:1`), `wasm` (a `wasm:` url), and `eval` (`[eval]`, `evalmachine.<anonymous>`, and anything
 else with a url that isn't a real file). Every printed key still works as a `<function>` argument,
 unchanged.
+
+---
+
+[Japanese](README.ja.md)
