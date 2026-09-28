@@ -4,7 +4,7 @@
 
 [![npm version](https://img.shields.io/npm/v/finderscope?logo=npm)](https://www.npmjs.com/package/finderscope)
 
-finderscope は、V8 profile（`.cpuprofile`、`.heapprofile`）を、コーディングエージェントが
+finderscope は、V8 profile（`.cpuprofile`、`.heapprofile`、`.heapsnapshot`）を、コーディングエージェントが
 一度で読める短い順位付き report に変換する。さらに、次に実行する command を示す。
 詳しい設計は [docs/design.md](docs/design.md) にある。
 [エージェント向け skill](skills/finderscope/SKILL.md) は、短い profiling workflow を提供する。
@@ -20,11 +20,13 @@ npm install --save-dev finderscope
 ```
 finderscope <profile> [--root dir] [--from ms --to ms] [--json]
 finderscope top <profile> [--by self|total|root] [--area <area>] [--from ms --to ms] [-n N] [--json]
+finderscope top <snapshot> [--by retained|self|count] [-n N] [--json]
+finderscope retainers <snapshot> <constructor-or-#id> [-n N] [--json]
 finderscope callers <profile> <function> [--expand] [--paths] [--from ms --to ms] [-n N] [--json]
 finderscope callees <profile> <function> [--expand] [--paths] [--from ms --to ms] [-n N] [--json]
 finderscope lines <profile> <function> [--from ms --to ms] [-n N] [--json]
 finderscope diff <before> <after> [-n N] [--json]
-finderscope run [--heap] [--heap-peak] [--root dir] [--json] -- <command...>
+finderscope run [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-threshold <percent>] [--heap-snapshot-min <MB>] [--exit-on-signal] [--root dir] [--json] -- <command...>
 finderscope timeline <profile> [--json]
 finderscope --help | -h | help
 ```
@@ -64,7 +66,7 @@ macOS では、file が存在しない場合も `/tmp` と `/private/tmp`、`/va
 ```
 $ finderscope run -- node test/fixtures/busy-script.js
 
-scratch dir: /tmp/finderscope-xxxxxx (kept on purpose - re-query it with finderscope callers/callees/top)
+scratch dir: /tmp/finderscope-xxxxxx (kept on purpose - re-query it with finderscope callers/callees/top/retainers)
 
 profile: /tmp/finderscope-xxxxxx/CPU.20260101.000000.12345.0.001.cpuprofile
 
@@ -107,8 +109,34 @@ profile path と function key である。space、`$`、backtick が含まれて
 macOS では `/usr/bin/time -l <command>`、または `--heapsnapshot-near-heap-limit` を使う。
 `run --heap-peak` は `--heapsnapshot-near-heap-limit` を追加する。ただし、対象 command が
 `--max-old-space-size` で heap 上限も指定した場合だけである。上限がなければ、V8 は limit に
-近付かず snapshot を作らない。`run` は snapshot の path を報告する。finderscope 自身は
-snapshot を読まない。heap 上限がない場合は、flag を黙って無視せず、その理由を表示する。
+近付かず snapshot を作らない。`run` は snapshot を解析する。heap 上限がない場合は、flag を
+黙って無視せず、その理由を表示する。
+
+heap snapshot summary は、constructor を self size 順に表示し、retained column も残す。
+retained size がほぼ同じ dominator chain は最も深い object にまとめ、保持 path に chain 全体を
+表示する。summary の `-n` で object list の続きを表示できる。`top` の既定値は self size である。
+表示した constructor key と `#id` は `retainers` の引数として使える。
+
+`run --heap-snapshot` は `heapUsed` を短い間隔で測り、より高い peak に達するたびに Node thread
+ごとの snapshot を置き換える。既定の threshold は 25% である。開始時からの増加量は既定で
+64 MB とし、`--heap-snapshot-min` で変更できる。report は snapshot の有無、観測した peak、
+snapshot 書き込みの CPU time を常に表示する。`finderscope` area が注入した preload の処理を
+保持し、your code section の対象から外す。snapshot の書き込み中は program が停止し、heap size と
+同程度の追加 memory を使うことがある。process の終了時にも `heapUsed` を確認するため、同期処理の
+終了時に残っている memory も条件を満たせる。大きな heap では書き込みに数秒かかり、終了も同じ時間だけ
+遅れる。`heapUsed` が V8 heap limit の半分以上なら、終了時の書き込みを行わない。sampler tick の間隔が 1 秒を超えた場合、その同期処理中の
+peak を見逃した可能性を表示する。`run --heap-peak` で peak の時刻を特定し、program のその位置で
+`v8.writeHeapSnapshot()` を呼ぶ。snapshot は書き込みの前に GC を実行する。snapshot に残った量が
+取得時の `heapUsed` の半分に満たないときは、残りはすでに不要になっていて peak の保持元が消えている
+可能性があると表示する。script の終了時に取った snapshot は、たいていこれに当たる。
+
+`run --exit-on-signal` は、Node child が独自の listener を持たない場合だけ、SIGTERM、SIGINT、
+SIGHUP を通常の exit に変換する。これにより V8 は CPU profile を書き出せる。program 独自の
+signal listener には終了処理のための 2 秒を与える。2 秒後も process が動いていれば、通常の signal code で
+終了するため、それより遅い終了処理は完了しない。process が同期処理を実行中の場合、JavaScript の signal
+listener は処理が制御を返すまで動かないため、この flag は終了を遅らせることがある。SIGKILL は
+その process を終了でき、捕捉できない。すべての CPU profile が idle 中心なら、考えられる原因と、
+`--exit-on-signal` を追加した shell-safe な再実行 command を表示する。
 
 `own` は、エージェントが編集できる実際の source を表す。`--root` の中にあるという意味では
 ない。`node_modules` の外にある `file://` URL または absolute path は、場所にかかわらず

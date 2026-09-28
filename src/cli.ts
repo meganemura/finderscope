@@ -12,11 +12,13 @@
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { analyzeCpuProfile, analyzeHeapProfile, buildTimeline, type ProfileAnalysis, type TimeWindow } from "./model.js";
-import { detectProfileKind, ProfileShapeError } from "./profile/detect.js";
+import { analyzeHeapSnapshot, type HeapSnapshotAnalysis } from "./heapsnapshot.js";
+import { detectProfileFileKind, detectProfileKind, ProfileShapeError } from "./profile/detect.js";
 import { parseCpuProfile } from "./profile/cpu.js";
 import { parseHeapProfile } from "./profile/heap.js";
+import { parseHeapSnapshot } from "./profile/heapsnapshot.js";
 import { resolveFunction } from "./query.js";
-import { buildSummary, formatSummaryText } from "./report/summary.js";
+import { buildSummary, formatSummaryText, formatValue } from "./report/summary.js";
 import { buildTop, formatTopText, type TopOptions } from "./report/top.js";
 import { buildCallersPaths, buildCallersTree, formatCallersPathsText, formatCallersTreeText } from "./report/callers.js";
 import { buildCalleesPaths, buildCalleesTree, formatCalleesPathsText, formatCalleesTreeText } from "./report/callees.js";
@@ -25,6 +27,15 @@ import { buildLines, formatLinesText } from "./report/lines.js";
 import { buildTimelineData, formatTimelineText } from "./report/timeline.js";
 import { shQuote } from "./report/summary.js";
 import { runCommand } from "./run.js";
+import {
+  buildHeapSnapshotRetainers,
+  buildHeapSnapshotSummary,
+  buildHeapSnapshotTop,
+  formatHeapSnapshotRetainersText,
+  formatHeapSnapshotSummaryText,
+  formatHeapSnapshotTopText,
+  type SnapshotTopBy,
+} from "./report/heapsnapshot.js";
 
 export interface Io {
   stdout: (text: string) => void;
@@ -96,7 +107,7 @@ interface ParsedArgs {
   options: Map<string, string | boolean>;
 }
 
-const BOOLEAN_FLAGS = new Set(["json", "heap", "heap-peak", "expand", "paths"]);
+const BOOLEAN_FLAGS = new Set(["json", "heap", "heap-peak", "heap-snapshot", "exit-on-signal", "expand", "paths"]);
 
 /**
  * A single hand-written pass: `--name value` and `--name=value` both set an option; a flag in
@@ -171,6 +182,35 @@ function parsePositiveInt(raw: string | undefined, usage: string): number | unde
   return value;
 }
 
+function snapshotCount(n: number | undefined, command: string): number | undefined {
+  if (n !== undefined && n > 500) throw new CliError(`snapshot -n ${n} exceeds the maximum 500`, `${command} -n 500`);
+  return n;
+}
+
+function parsePositiveNumber(raw: string | undefined, usage: string, label = "percentage"): number | undefined {
+  if (raw === undefined) return undefined;
+  const value = Number(raw.trim());
+  if (!Number.isFinite(value) || value <= 0) throw new CliError(`invalid ${label} ${raw}`, usage);
+  return value;
+}
+
+function snapshotFile(path: string): boolean {
+  try {
+    return detectProfileFileKind(path) === "heap-snapshot";
+  } catch {
+    throw new CliError(`cannot read profile file ${path}`, `check the path: ls ${shQuote(path)}`);
+  }
+}
+
+function loadHeapSnapshot(path: string): HeapSnapshotAnalysis {
+  try {
+    return analyzeHeapSnapshot(parseHeapSnapshot(path));
+  } catch (e) {
+    if (!(e instanceof ProfileShapeError)) throw e;
+    throw new CliError(e.message, `open ${shQuote(path)} and check it is a heap snapshot written by Node or Chrome`);
+  }
+}
+
 function readProfileJson(path: string): { json: unknown; kind: "cpu" | "heap" } {
   let raw: string;
   try {
@@ -186,12 +226,13 @@ function readProfileJson(path: string): { json: unknown; kind: "cpu" | "heap" } 
     throw new CliError(`${path} is not valid JSON`, `open ${shQuote(path)} and check it is a real .cpuprofile or .heapprofile`);
   }
 
-  let kind: "cpu" | "heap";
+  let kind: "cpu" | "heap" | "heap-snapshot";
   try {
     kind = detectProfileKind(json);
   } catch (e) {
-    throw new CliError((e as Error).message, `pass a .cpuprofile or .heapprofile written by node --cpu-prof / --heap-prof`);
+    throw new CliError((e as Error).message, `pass a .cpuprofile, .heapprofile, or .heapsnapshot written by Node or Chrome`);
   }
+  if (kind === "heap-snapshot") throw new CliError(`${path} is a heap snapshot and must be streamed`, `finderscope ${shQuote(path)}`);
   return { json, kind };
 }
 
@@ -296,8 +337,8 @@ function printError(io: Io, json: boolean, message: string, doLine: string, sugg
  * ending via a signal with no profile - confirmed by hand not to be reliable to reproduce: a
  * child self-signaled with SIGKILL right after starting still had its --cpu-prof profile written,
  * because Node had already flushed something to disk in the time before the signal was delivered.
- * V8 only writes a --cpu-prof/--heap-prof file on a NORMAL exit - a signal-ended child (killed,
- * crashed, or a forwarded SIGINT/SIGTERM) may never get the chance, which is a different, expected
+ * V8 only writes a --cpu-prof/--heap-prof file on a NORMAL exit - an uncatchably killed or crashed
+ * child may never get the chance, which is a different, expected
  * reason to see no profile than the "did this even run node" question a normal exit with no
  * profile raises.
  */
@@ -315,7 +356,7 @@ export function noProfileWarning(signal: NodeJS.Signals | null): { message: stri
 }
 
 const USAGE =
-  "usage: finderscope '<profile>' [--from ms --to ms] | top '<profile>' | callers '<profile>' '<fn>' [--expand] [--paths] | callees '<profile>' '<fn>' [--expand] [--paths] | lines '<profile>' '<fn>' | diff '<before>' '<after>' | run [--heap] [--heap-peak] -- '<command...>' | timeline '<profile>' | help";
+  "usage: finderscope '<profile>' [--from ms --to ms] | top '<profile>' | retainers '<snapshot>' '<constructor-or-#id>' | callers '<profile>' '<fn>' | callees '<profile>' '<fn>' | lines '<profile>' '<fn>' | diff '<before>' '<after>' | run [--heap] [--heap-peak] [--heap-snapshot] [--exit-on-signal] -- '<command...>' | timeline '<profile>' | help";
 
 /** Every token before the first literal "--" (run's own child-command separator) - a "-h"/"--help"
  *  AFTER that boundary belongs to the profiled command, not to finderscope itself, and must never
@@ -332,13 +373,14 @@ function wantsHelp(rest: string[]): boolean {
 const HELP_DO = "finderscope run -- node your-script.js";
 
 const COMMAND_HELP: Record<string, string> = {
-  summary: "finderscope '<profile>' [--root dir] [--from ms --to ms] [--json]\n  The summary: your code top down, areas, top functions, hottest paths, and do:.",
-  top: "finderscope top '<profile>' [--by self|total|root] [--area area] [--from ms --to ms] [-n N] [--json]\n  A longer ranked list.",
+  summary: "finderscope '<profile>' [--root dir] [--from ms --to ms] [--json]\nfinderscope '<snapshot>' [-n N] [--json]\n  The summary: your code top down, areas, top functions, hottest paths, and do:.",
+  top: "finderscope top '<profile>' [--by self|total|root] [--area area] [--from ms --to ms] [-n N] [--json]\nfinderscope top '<snapshot>' [--by retained|self|count] [-n N] [--json]\n  A longer ranked list.",
+  retainers: "finderscope retainers '<snapshot>' '<constructor-or-#id>' [-n N] [--json]\n  The retaining paths into one constructor group or object.",
   callers: "finderscope callers '<profile>' '<function>' [--expand] [--paths] [--from ms --to ms] [-n N] [--json]\n  Which call paths lead to the function.",
   callees: "finderscope callees '<profile>' '<function>' [--expand] [--paths] [--from ms --to ms] [-n N] [--json]\n  Where the function's own total time goes.",
   lines: "finderscope lines '<profile>' '<function>' [--from ms --to ms] [-n N] [--json]\n  The hot lines inside the function's own body.",
   diff: "finderscope diff '<before>' '<after>' [-n N] [--json]\n  The functions and areas whose share changed most.",
-  run: "finderscope run [--heap] [--heap-peak] [--root dir] [--json] -- '<command...>'\n  Runs the command, then prints the summary for each profile it wrote.",
+  run: "finderscope run [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-threshold percent] [--heap-snapshot-min MB] [--exit-on-signal] [--root dir] [--json] -- '<command...>'\n  Runs the command, then prints the summary for each profile it wrote.",
   timeline: "finderscope timeline '<profile>' [--json]\n  20 equal time buckets, each with the top own function by self time - pick a --from/--to window from this.",
 };
 
@@ -367,7 +409,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
     throw new CliError("no command or profile given", USAGE);
   }
 
-  const KNOWN_SUBCOMMANDS = new Set(["top", "callers", "callees", "lines", "diff", "run", "timeline", "help"]);
+  const KNOWN_SUBCOMMANDS = new Set(["top", "retainers", "callers", "callees", "lines", "diff", "run", "timeline", "help"]);
   const first = argv[0]!;
   const subcommand = KNOWN_SUBCOMMANDS.has(first) ? first : "summary";
   const rest = subcommand === "summary" ? argv : argv.slice(1);
@@ -387,9 +429,21 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
 
   switch (subcommand) {
     case "summary": {
-      checkKnownOptions(options, new Set(["json", "root", "from", "to"]), USAGE);
       const profilePath = positionals[0];
       if (profilePath === undefined) throw new CliError("no profile given", USAGE);
+      if (snapshotFile(profilePath)) {
+        checkKnownOptions(options, new Set(["json", "from", "to", "n"]), USAGE);
+        if (options.has("from") || options.has("to")) {
+          throw new CliError(`${profilePath} is a heap snapshot - --from/--to only works on a .cpuprofile`, `finderscope ${shQuote(profilePath)}`);
+        }
+        return attributeUnexpectedErrorsTo([profilePath], () => {
+          const n = parsePositiveInt(optionString(options, "n"), `finderscope ${shQuote(profilePath)} -n '<positive integer>'`);
+          const data = buildHeapSnapshotSummary(loadHeapSnapshot(profilePath), profilePath, snapshotCount(n, `finderscope ${shQuote(profilePath)}`));
+          io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatHeapSnapshotSummaryText(data, profilePath)}\n`);
+          return 0;
+        });
+      }
+      checkKnownOptions(options, new Set(["json", "root", "from", "to"]), USAGE);
       const { window, windowArgs } = parseWindow(options, `finderscope ${shQuote(profilePath)} --from ms --to ms`);
       return attributeUnexpectedErrorsTo([profilePath], () => {
         const analysis = loadAnalysis(profilePath, root, window);
@@ -405,6 +459,22 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       checkKnownOptions(options, new Set(["json", "root", "by", "area", "n", "from", "to"]), `finderscope top ${shQuote(profilePath)}`);
       const n = parsePositiveInt(optionString(options, "n"), `finderscope top ${shQuote(profilePath)} -n '<positive integer>'`);
       const by = optionString(options, "by");
+      if (snapshotFile(profilePath)) {
+        if (options.has("root")) {
+          throw new CliError(`${profilePath} is a heap snapshot - --root does not apply`, `finderscope top ${shQuote(profilePath)} --by self`);
+        }
+        if (options.has("area") || options.has("from") || options.has("to")) {
+          throw new CliError(`${profilePath} is a heap snapshot - --area and --from/--to do not apply`, `finderscope top ${shQuote(profilePath)} --by retained`);
+        }
+        if (by !== undefined && by !== "retained" && by !== "self" && by !== "count") {
+          throw new CliError(`invalid --by ${by}; use retained, self or count for a heap snapshot`, `finderscope top ${shQuote(profilePath)} --by retained`);
+        }
+        return attributeUnexpectedErrorsTo([profilePath], () => {
+          const data = buildHeapSnapshotTop(loadHeapSnapshot(profilePath), profilePath, (by ?? "self") as SnapshotTopBy, snapshotCount(n, `finderscope top ${shQuote(profilePath)} --by ${by ?? "self"}`));
+          io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatHeapSnapshotTopText(data, profilePath)}\n`);
+          return 0;
+        });
+      }
       if (by !== undefined && by !== "self" && by !== "total" && by !== "root") {
         throw new CliError(`invalid --by ${by}; use self, total or root`,`finderscope top ${shQuote(profilePath)} --by self`);
       }
@@ -419,6 +489,20 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       });
     }
 
+    case "retainers": {
+      const profilePath = positionals[0];
+      const query = positionals[1];
+      if (profilePath === undefined || query === undefined) throw new CliError("need a heap snapshot and a constructor or node id", `finderscope retainers '<snapshot>' '<constructor-or-#id>'`);
+      checkKnownOptions(options, new Set(["json", "n"]), `finderscope retainers ${shQuote(profilePath)} ${shQuote(query)}`);
+      const n = parsePositiveInt(optionString(options, "n"), `finderscope retainers ${shQuote(profilePath)} ${shQuote(query)} -n '<positive integer>'`);
+      if (!snapshotFile(profilePath)) throw new CliError(`${profilePath} is not a heap snapshot`, `finderscope ${shQuote(profilePath)}`);
+      return attributeUnexpectedErrorsTo([profilePath], () => {
+        const data = buildHeapSnapshotRetainers(loadHeapSnapshot(profilePath), profilePath, query, snapshotCount(n, `finderscope retainers ${shQuote(profilePath)} ${shQuote(query)}`));
+        io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatHeapSnapshotRetainersText(data, profilePath)}\n`);
+        return 0;
+      });
+    }
+
     case "callers":
     case "callees": {
       const profilePath = positionals[0];
@@ -427,6 +511,9 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
         throw new CliError("need a profile and a function", `finderscope ${subcommand} '<profile>' '<function>'`);
       }
       checkKnownOptions(options, new Set(["json", "root", "expand", "paths", "n", "from", "to"]), `finderscope ${subcommand} ${shQuote(profilePath)} ${shQuote(query)}`);
+      if (snapshotFile(profilePath)) {
+        throw new CliError(`${subcommand} does not apply to a heap snapshot; use retainers`, `finderscope retainers ${shQuote(profilePath)} ${shQuote(query)}`);
+      }
       const n = parsePositiveInt(
         optionString(options, "n"),
         `finderscope ${subcommand} ${shQuote(profilePath)} '<function>' -n '<positive integer>'`,
@@ -471,6 +558,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
         throw new CliError("need a profile and a function", `finderscope lines '<profile>' '<function>'`);
       }
       checkKnownOptions(options, new Set(["json", "root", "n", "from", "to"]), `finderscope lines ${shQuote(profilePath)} ${shQuote(query)}`);
+      if (snapshotFile(profilePath)) throw new CliError(`lines does not apply to a heap snapshot`, `finderscope retainers ${shQuote(profilePath)} ${shQuote(query)}`);
       const n = parsePositiveInt(
         optionString(options, "n"),
         `finderscope lines ${shQuote(profilePath)} ${shQuote(query)} -n '<positive integer>'`,
@@ -495,6 +583,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       checkKnownOptions(options, new Set(["json", "root"]), `finderscope timeline '<profile>'`);
       const profilePath = positionals[0];
       if (profilePath === undefined) throw new CliError("no profile given", `finderscope timeline '<profile>'`);
+      if (snapshotFile(profilePath)) throw new CliError(`timeline does not apply to a heap snapshot`, `finderscope ${shQuote(profilePath)}`);
       return attributeUnexpectedErrorsTo([profilePath], () => {
         const profile = loadCpuProfileForTimeline(profilePath);
         const buckets = buildTimeline(profile, root);
@@ -515,6 +604,9 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
         optionString(options, "n"),
         `finderscope diff ${shQuote(beforePath)} ${shQuote(afterPath)} -n '<positive integer>'`,
       );
+      if (snapshotFile(beforePath) || snapshotFile(afterPath)) {
+        throw new CliError("snapshot diff is not available; constructor retained-size and count deltas need a distinct output shape", `finderscope ${shQuote(afterPath)}`);
+      }
       return attributeUnexpectedErrorsTo([beforePath, afterPath], () => {
         const before = loadAnalysis(beforePath, root);
         const after = loadAnalysis(afterPath, root);
@@ -525,20 +617,81 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
     }
 
     case "run": {
-      checkKnownOptions(options, new Set(["json", "root", "heap", "heap-peak"]), "finderscope run [--heap] [--heap-peak] -- '<command...>'");
+      checkKnownOptions(options, new Set(["json", "root", "heap", "heap-peak", "heap-snapshot", "heap-snapshot-threshold", "heap-snapshot-min", "exit-on-signal"]), "finderscope run [--heap] [--heap-peak] [--heap-snapshot] [--exit-on-signal] -- '<command...>'");
       const heap = options.get("heap") === true;
       const heapPeak = options.get("heap-peak") === true;
-      const result = await runCommand({ heap, heapPeak, command: positionals });
+      const heapSnapshot = options.get("heap-snapshot") === true;
+      const exitOnSignal = options.get("exit-on-signal") === true;
+      const heapSnapshotThreshold = parsePositiveNumber(
+        optionString(options, "heap-snapshot-threshold"),
+        "finderscope run --heap-snapshot --heap-snapshot-threshold '<percent>' -- '<command...>'",
+      );
+      const heapSnapshotMinMb = parsePositiveNumber(
+        optionString(options, "heap-snapshot-min"),
+        "finderscope run --heap-snapshot --heap-snapshot-min '<MB>' -- '<command...>'",
+        "MB value",
+      );
+      if (heapSnapshotThreshold !== undefined && !heapSnapshot) {
+        throw new CliError("--heap-snapshot-threshold requires --heap-snapshot", "finderscope run --heap-snapshot --heap-snapshot-threshold 25 -- '<command...>'");
+      }
+      if (heapSnapshotMinMb !== undefined && !heapSnapshot) {
+        throw new CliError("--heap-snapshot-min requires --heap-snapshot", "finderscope run --heap-snapshot --heap-snapshot-min 64 -- '<command...>'");
+      }
+      const buildRunRerun = (snapshotMinimum: number | undefined, withExitOnSignal: boolean): string => {
+        const args = ["finderscope run"];
+        if (heap) args.push("--heap");
+        if (heapPeak) args.push("--heap-peak");
+        if (heapSnapshot) args.push("--heap-snapshot");
+        if (heapSnapshotThreshold !== undefined) args.push(`--heap-snapshot-threshold ${heapSnapshotThreshold}`);
+        if (snapshotMinimum !== undefined) args.push(`--heap-snapshot-min ${snapshotMinimum}`);
+        if (withExitOnSignal || exitOnSignal) args.push("--exit-on-signal");
+        const requestedRoot = optionString(options, "root");
+        if (requestedRoot !== undefined) args.push(`--root ${shQuote(requestedRoot)}`);
+        if (json) args.push("--json");
+        args.push("--", ...positionals.map(shQuote));
+        return args.join(" ");
+      };
+      const result = await runCommand({ heap, heapPeak, heapSnapshot, heapSnapshotThreshold, heapSnapshotMinMb, exitOnSignal, command: positionals });
 
       // Never deleted, on purpose - stated here, not just in the README/design.md, since this is
       // the one moment an agent actually needs to know it can come back to this exact path.
-      const scratchNote = `scratch dir: ${result.scratchDir} (kept on purpose - re-query it with finderscope callers/callees/top)`;
+      const scratchNote = `scratch dir: ${result.scratchDir} (kept on purpose - re-query it with finderscope callers/callees/top/retainers)`;
       const heapSnapshotNote =
         result.heapSnapshots.length > 0
-          ? `heap snapshot near the limit: ${result.heapSnapshots.join(", ")} (finderscope does not read this file - open it in Chrome DevTools' Memory panel)`
+          ? `heap snapshot: ${result.heapSnapshots.map((path) => {
+              const capture = result.heapSnapshotCaptures.find((item) => item.path === path);
+              return capture === undefined ? path : `${path} (thread ${capture.threadId})`;
+            }).join(", ")}`
           : undefined;
+      const snapshotStats = result.heapSnapshotStats;
+      const captureNote = snapshotStats === undefined ? undefined : snapshotStats.snapshotsWritten > 0
+        ? `${snapshotStats.snapshotsWritten} heap ${snapshotStats.snapshotsWritten === 1 ? "snapshot" : "snapshots"} written; snapshot writing used ${formatValue("time", snapshotStats.cpuTimeUs)} CPU time and can need about the heap size in extra memory`
+        : `0 heap snapshots written; snapshot writing used ${formatValue("time", snapshotStats.cpuTimeUs)} CPU time; no snapshot qualified; peak heapUsed ${formatValue("bytes", snapshotStats.peakHeapUsed)}; minimum growth was ${heapSnapshotMinMb ?? 64}MB`;
+      const heapSnapshotGapNote = snapshotStats !== undefined && snapshotStats.maxSamplerGapMs > 1000
+        ? `the heap sampler could not run for ${formatValue("time", snapshotStats.maxSamplerGapMs * 1000)} at a time because synchronous work blocked it; a peak inside that stretch may be missed; find the peak time with finderscope run --heap-peak, then call v8.writeHeapSnapshot() at that point in the program`
+        : undefined;
+      // A snapshot taken after the program dropped its data (typically at exit) holds only what is
+      // still live. Presenting it as the peak without saying so would send an agent after the wrong
+      // retainers.
+      const garbageCapture = result.heapSnapshotCaptures.find((capture) =>
+        capture.liveAfter !== undefined && capture.liveAfter < capture.heapUsed / 2);
+      const heapSnapshotGarbageNote = garbageCapture === undefined
+        ? undefined
+        : `the snapshot holds about ${formatValue("bytes", garbageCapture.liveAfter!)} of live objects, but heapUsed was ${formatValue("bytes", garbageCapture.heapUsed)} at capture; the rest was already garbage, so the peak's retainers may be gone; find the peak time with finderscope run --heap-peak, then call v8.writeHeapSnapshot() at that point in the program`;
+      const heapSnapshotErrorNote = snapshotStats?.errors[0] === undefined
+        ? undefined
+        : `heap snapshot sampling stopped after an error: ${snapshotStats.errors[0]}`;
+      const heapSnapshotExitNote = (snapshotStats?.exitSkipped.length ?? 0) === 0
+        ? undefined
+        : `the exit-time heap snapshot was skipped near the heap limit`;
+      const configuredFloor = heapSnapshotMinMb ?? 64;
+      const observedGrowthMb = snapshotStats === undefined ? 0 : snapshotStats.maxGrowth / (1024 * 1024);
+      const lowerFloor = snapshotStats === undefined ? undefined : Math.min(configuredFloor / 2, observedGrowthMb || configuredFloor / 2);
+      const snapshotRetryDo = snapshotStats?.snapshotsWritten === 0
+        ? buildRunRerun(lowerFloor, false)
+        : undefined;
 
-      if (result.profiles.length === 0) {
+      if (result.profiles.length === 0 && result.heapSnapshots.length === 0) {
         // A heap snapshot near the limit is real, useful output even when the command crashed
         // before it could write a normal --cpu-prof/--heap-prof profile (an OOM kill routinely
         // ends the process via a signal right after the snapshot itself was flushed to disk) -
@@ -554,11 +707,11 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
             : noProfileWarning(result.signal);
         if (json) {
           io.stdout(
-            `${JSON.stringify({ scratchDir: result.scratchDir, profiles: [], errors: [], heapSnapshots: result.heapSnapshots, heapPeakNote: result.heapPeakNote, warning: warning.message, do: warning.do })}\n`,
+            `${JSON.stringify({ scratchDir: result.scratchDir, profiles: [], errors: [], heapSnapshots: result.heapSnapshots, heapSnapshotCaptures: result.heapSnapshotCaptures, heapSnapshotStats: result.heapSnapshotStats, heapSnapshotNote: captureNote, heapSnapshotGapNote, heapSnapshotGarbageNote, heapSnapshotErrorNote, heapSnapshotExitNote, heapPeakNote: result.heapPeakNote, warning: warning.message, do: snapshotRetryDo ?? warning.do })}\n`,
           );
         } else {
-          const extra = [heapSnapshotNote, result.heapPeakNote].filter((s): s is string => s !== undefined).map((s) => `note: ${s}\n`).join("");
-          io.stdout(`${scratchNote}\n${extra}warning: ${warning.message}\ndo: ${warning.do}\n`);
+          const extra = [heapSnapshotNote, captureNote, heapSnapshotGapNote, heapSnapshotGarbageNote, heapSnapshotErrorNote, heapSnapshotExitNote, result.heapPeakNote].filter((s): s is string => s !== undefined).map((s) => `note: ${s}\n`).join("");
+          io.stdout(`${scratchNote}\n${extra}warning: ${warning.message}\ndo: ${snapshotRetryDo ?? warning.do}\n`);
         }
         return result.exitCode;
       }
@@ -567,15 +720,25 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       const errors: { profile: string; error: string; do: string }[] = [];
       const textBlocks: string[] = [];
       let firstDo: string | undefined;
+      let cpuProfiles = 0;
+      let allCpuProfilesIdle = true;
 
-      for (const profilePath of result.profiles) {
+      for (const profilePath of [...result.profiles, ...result.heapSnapshots]) {
         try {
           const data = attributeUnexpectedErrorsTo([profilePath], () => {
+            if (snapshotFile(profilePath)) return buildHeapSnapshotSummary(loadHeapSnapshot(profilePath), profilePath);
             const analysis = loadAnalysis(profilePath, root);
+            if (analysis.metric === "time") {
+              cpuProfiles++;
+              const idleShare = analysis.total > 0 ? (analysis.areaTotals.get("idle") ?? 0) / analysis.total : 0;
+              allCpuProfilesIdle &&= idleShare >= 0.8;
+            }
             return buildSummary(analysis, profilePath);
           });
           summaries.push(data);
-          textBlocks.push(formatSummaryText(data, profilePath));
+          textBlocks.push(snapshotFile(profilePath)
+            ? formatHeapSnapshotSummaryText(data as ReturnType<typeof buildHeapSnapshotSummary>, profilePath)
+            : formatSummaryText(data as ReturnType<typeof buildSummary>, profilePath));
           firstDo ??= data.do;
         } catch (e) {
           // One bad profile must not hide the others `run` already wrote - report it inline and
@@ -588,14 +751,21 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
         }
       }
 
-      const overallDo = firstDo ?? "finderscope run -- '<command...>'";
+      const idleNote = cpuProfiles > 0 && allCpuProfilesIdle
+        ? "every CPU profile was at least 80% idle; a child may have ended by a signal, run native code, or done work in a process that was not Node. --exit-on-signal keeps the profile of a child ended by SIGTERM, SIGINT, or SIGHUP, but a child busy in synchronous code then exits only when it yields"
+        : undefined;
+      const idleDo = idleNote === undefined
+        ? undefined
+        : buildRunRerun(heapSnapshotMinMb, true);
+      const overallDo = snapshotRetryDo ?? idleDo ?? firstDo ?? "finderscope run -- '<command...>'";
       if (json) {
         io.stdout(
-          `${JSON.stringify({ scratchDir: result.scratchDir, profiles: summaries, errors, heapSnapshots: result.heapSnapshots, heapPeakNote: result.heapPeakNote, do: overallDo })}\n`,
+          `${JSON.stringify({ scratchDir: result.scratchDir, profiles: summaries, errors, heapSnapshots: result.heapSnapshots, heapSnapshotCaptures: result.heapSnapshotCaptures, heapSnapshotStats: result.heapSnapshotStats, heapSnapshotNote: captureNote, heapSnapshotGapNote, heapSnapshotGarbageNote, heapSnapshotErrorNote, heapSnapshotExitNote, heapPeakNote: result.heapPeakNote, idleNote, do: overallDo })}\n`,
         );
       } else {
-        const extra = [heapSnapshotNote, result.heapPeakNote].filter((s): s is string => s !== undefined).map((s) => `note: ${s}\n`).join("");
-        io.stdout(`${scratchNote}\n${extra}\n${textBlocks.join("\n\n")}\n`);
+        const extra = [heapSnapshotNote, captureNote, heapSnapshotGapNote, heapSnapshotGarbageNote, heapSnapshotErrorNote, heapSnapshotExitNote, result.heapPeakNote, idleNote].filter((s): s is string => s !== undefined).map((s) => `note: ${s}\n`).join("");
+        const finalDo = snapshotRetryDo !== undefined || idleDo !== undefined ? `\ndo: ${overallDo}` : "";
+        io.stdout(`${scratchNote}\n${extra}\n${textBlocks.join("\n\n")}${finalDo}\n`);
       }
       return result.exitCode;
     }

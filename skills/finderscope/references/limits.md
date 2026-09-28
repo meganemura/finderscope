@@ -6,7 +6,22 @@
 Peak memory can be higher because temporary allocations can disappear before exit.
 On macOS, run `/usr/bin/time -l <command...>` to measure the process peak.
 For a heap snapshot near a limit, run `finderscope run --heap-peak -- node --max-old-space-size=<MiB> <script>`.
-Open the reported `.heapsnapshot` in the Chrome DevTools Memory panel.
+Use `finderscope run --heap-snapshot -- <command...>` to keep one snapshot near the observed peak.
+Snapshot writing pauses the process and can need about the heap size in extra memory.
+The timer cannot sample during synchronous work. A reported sampler gap means a peak inside that
+interval can be missing. Locate it with `run --heap-peak`, then call `v8.writeHeapSnapshot()` at
+that point in the program.
+A snapshot write collects garbage first. A garbage note means the file holds less than half of the
+heap counted at capture, so the peak's retainers may be gone. Exit-time captures often do this.
+
+## Child processes
+
+SIGKILL cannot be caught, so a Node child terminated with SIGKILL can lose its final CPU profile.
+`run --exit-on-signal` can preserve profiles for catchable signals. A JavaScript signal listener
+cannot run while synchronous code holds the thread, so this flag can delay termination until the
+code yields. SIGKILL still ends a process in that state.
+A native child, such as a Go-based compiler, never appears in a V8 profile. A synchronous wait for
+that child appears as `spawnSync` self time in the Node parent, not as idle time.
 
 ## Line time
 

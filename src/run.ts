@@ -1,15 +1,11 @@
-// Responsibility: `run` - spawn exactly the command the caller gave, with NODE_OPTIONS extended
-// so every Node process it starts (including child Node processes) writes a .cpuprofile (and,
-// with --heap, a .heapprofile) into one scratch directory; wait for it; report every profile
-// written there, largest first. The scratch directory is never deleted, on purpose: it is the
-// path an agent re-queries with `finderscope callers`/`callees`/`top` after reading the summary
-// - see cli.ts's own comment on why that path is printed before any summarizing happens.
-// Boundary: never runs anything the caller did not name - no shell, no wrapper command. Does not
-// parse or summarize a profile itself - src/cli.ts does that with the same profile/model/report
-// modules every other command uses.
+// Responsibility: `run` extends NODE_OPTIONS so each Node process writes CPU, optional heap, and
+// optional peak-snapshot data into one kept scratch directory. On request, it lets catchable
+// signals flush profiles, waits for the named command, and returns every artifact largest first.
+// Boundary: never adds a wrapper command and never parses or summarizes a profile. cli.ts owns
+// reports and the callers/callees/top/retainers commands that re-query the kept artifacts.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readdirSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { constants as osConstants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { shQuote } from "./report/summary.js";
@@ -21,27 +17,33 @@ export interface RunOptions {
    *  happens when the caller also capped the heap - see hasHeapCap()'s own comment on why this
    *  never adds the flag otherwise. */
   heapPeak: boolean;
+  /** Periodically replaces one snapshot per Node process as heapUsed reaches new highs. Unlike
+   *  heapPeak, this does not require a configured V8 heap limit. */
+  heapSnapshot?: boolean;
+  heapSnapshotThreshold?: number;
+  heapSnapshotMinMb?: number;
+  /** Converts otherwise unhandled catchable signals to conventional numeric exits so V8 flushes
+   *  profiles. Opt-in because a synchronous loop cannot run a JavaScript signal listener. */
+  exitOnSignal?: boolean;
   command: string[];
 }
 
 export interface RunResult {
   exitCode: number;
-  /** Set only when the child ended via a signal (SIGKILL, a forwarded SIGINT/SIGTERM, a crash) -
-   *  not a normal exit. V8 only writes a --cpu-prof/--heap-prof file when the process exits
-   *  normally, so a signal-ended child with no profile is expected, not a bug to warn about the
-   *  same way an unrelated missing profile would be. */
+  /** Set only when the child ended via an unconverted signal, such as SIGKILL, a crash, or a
+   *  catchable signal when exitOnSignal was not requested. */
   signal: NodeJS.Signals | null;
   scratchDir: string;
   /** Absolute paths, largest file first. */
   profiles: string[];
-  /** Absolute paths to any .heapsnapshot --heapsnapshot-near-heap-limit wrote into scratchDir
-   *  (--diagnostic-dir steers it there instead of its own default, the caller's cwd) - empty when
-   *  --heap-peak was not given, or was given but the command had no heap cap to make it fire. */
+  /** Absolute paths to heap snapshots captured by --heap-peak or --heap-snapshot, largest first. */
   heapSnapshots: string[];
   /** Set only when --heap-peak was given but the command had no heap cap (--max-old-space-size) -
    *  a fact to report, not an error: without a cap, V8 never approaches a limit at all, so
    *  --heapsnapshot-near-heap-limit would never trigger. */
   heapPeakNote: string | undefined;
+  heapSnapshotCaptures: { path: string; heapUsed: number; cpuTimeUs: number; liveAfter?: number; threadId: number }[];
+  heapSnapshotStats: { snapshotsWritten: number; peakHeapUsed: number; maxGrowth: number; cpuTimeUs: number; maxSamplerGapMs: number; errors: string[]; exitSkipped: string[] } | undefined;
 }
 
 /** A caller mistake about the command itself - no command given, or the command does not exist -
@@ -71,8 +73,8 @@ function exitCodeFor(code: number | null, signal: NodeJS.Signals | null): number
  *  prefix can be exactly that: e.g. "/private/var/.../T/tmp sp/finderscope-xxxxxx") would
  *  otherwise truncate `--cpu-prof-dir` at the first space, silently profiling into the wrong
  *  directory or none at all. */
-function quoteForNodeOptions(value: string): string {
-  return `"${value.replace(/"/g, '\\"')}"`;
+export function quoteForNodeOptions(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
 // Every real spelling V8/Node accepts for a heap cap: the dash form, the underscore form (V8's own
@@ -101,6 +103,31 @@ export function runCommand(options: RunOptions): Promise<RunResult> {
     const scratchDir = mkdtempSync(join(tmpdir(), "finderscope-"));
     const existingNodeOptions = process.env["NODE_OPTIONS"] ?? "";
     const flags = [`--cpu-prof`, `--cpu-prof-dir=${quoteForNodeOptions(scratchDir)}`];
+    if (options.exitOnSignal) {
+      const signalPreloadPath = join(scratchDir, "signal-exit-preload.cjs");
+      // V8 flushes CPU profiles on normal process exit. This handler converts an otherwise
+      // unhandled catchable termination signal into the conventional numeric exit without taking
+      // control from a program that installed its own shutdown listener. It is opt-in because a
+      // signal cannot interrupt synchronous JavaScript to run this listener.
+      writeFileSync(signalPreloadPath, `
+const os = require("node:os");
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  const number = os.constants.signals[signal];
+  if (typeof number !== "number") continue;
+  try {
+process.on(signal, () => {
+      if (process.listenerCount(signal) === 1) {
+        process.exit(128 + number);
+        return;
+      }
+      const grace = setTimeout(() => process.exit(128 + number), 2000);
+      grace.unref();
+    });
+  } catch {}
+}
+`);
+      flags.push(`--require=${quoteForNodeOptions(signalPreloadPath)}`);
+    }
     if (options.heap) flags.push(`--heap-prof`, `--heap-prof-dir=${quoteForNodeOptions(scratchDir)}`);
     const capped = hasHeapCap(options.command, existingNodeOptions);
     let heapPeakNote: string | undefined;
@@ -115,6 +142,105 @@ export function runCommand(options: RunOptions): Promise<RunResult> {
         heapPeakNote =
           "--heap-peak had no --max-old-space-size to work with, so it added nothing - a heap snapshot near the limit needs a limit to be near; pass --max-old-space-size to the profiled command too";
       }
+    }
+    if (options.heapSnapshot) {
+      const preloadPath = join(scratchDir, "heap-snapshot-preload.cjs");
+      const threshold = options.heapSnapshotThreshold ?? 25;
+      const minimum = options.heapSnapshotMinMb ?? 64;
+      // The module lives in the scratch directory because NODE_OPTIONS must reach child Node
+      // processes too; a path beside finderscope's installed JS would bind collection to one
+      // package layout and would not let each run own its output file.
+      writeFileSync(preloadPath, `
+const fs = require("node:fs");
+const path = require("node:path");
+const v8 = require("node:v8");
+const crypto = require("node:crypto");
+const threadId = require("node:worker_threads").threadId;
+const stem = "heap-peak-" + process.pid + "-" + threadId + "-" + crypto.randomBytes(4).toString("hex");
+const target = path.join(${JSON.stringify(scratchDir)}, stem + ".heapsnapshot");
+const metadata = path.join(${JSON.stringify(scratchDir)}, stem + ".json");
+const threshold = ${JSON.stringify(threshold / 100)};
+const minimum = ${JSON.stringify(minimum * 1024 * 1024)};
+const start = process.memoryUsage().heapUsed;
+let lastWritten = start;
+let peakHeapUsed = start;
+let writing = false;
+const captures = [];
+let snapshotCpuTimeUs = 0;
+let lastSamplerTickMs = Date.now();
+let maxSamplerGapMs = 0;
+let failure;
+let exitSkipped;
+let timer;
+const persist = () => {
+  try {
+    fs.writeFileSync(metadata, JSON.stringify({ start, peakHeapUsed, captures, snapshotCpuTimeUs, maxSamplerGapMs, threadId, target, failure, exitSkipped }));
+    return true;
+  } catch {
+    return false;
+  }
+};
+const stopWithFailure = (error) => {
+  if (failure !== undefined) return;
+  failure = error instanceof Error ? error.message : String(error);
+  if (timer !== undefined) clearInterval(timer);
+  persist();
+};
+const observeSamplerGap = () => {
+  const now = Date.now();
+  maxSamplerGapMs = Math.max(maxSamplerGapMs, now - lastSamplerTickMs);
+  lastSamplerTickMs = now;
+};
+const captureIfQualified = (heapUsed) => {
+  peakHeapUsed = Math.max(peakHeapUsed, heapUsed);
+  if (writing || heapUsed < start + minimum || heapUsed < lastWritten * (1 + threshold)) return;
+  writing = true;
+  const next = target + ".next";
+  try {
+    if (fs.existsSync(next)) fs.unlinkSync(next);
+    const before = process.cpuUsage();
+    v8.writeHeapSnapshot(next);
+    const cpu = process.cpuUsage(before);
+    const cpuTimeUs = cpu.user + cpu.system;
+    fs.renameSync(next, target);
+    // writeHeapSnapshot collects garbage first, so heapUsed right after it is close to the live
+    // heap the file holds. The report compares it with heapUsed at capture.
+    captures.push({ heapUsed, cpuTimeUs, liveAfter: process.memoryUsage().heapUsed });
+    snapshotCpuTimeUs += cpuTimeUs;
+    lastWritten = heapUsed;
+    if (!persist()) stopWithFailure("could not write heap snapshot metadata");
+  } catch (error) {
+    stopWithFailure(error);
+  } finally {
+    writing = false;
+  }
+};
+if (!persist()) failure = "could not write heap snapshot metadata";
+if (failure === undefined) timer = setInterval(() => {
+  observeSamplerGap();
+  captureIfQualified(process.memoryUsage().heapUsed);
+  // Snapshot writing blocks this timer too, but the profiled program cannot create a missed peak
+  // while V8 has paused it. Start the next user-work interval after finderscope's write completes.
+  lastSamplerTickMs = Date.now();
+}, 20);
+if (timer !== undefined) timer.unref();
+process.on("exit", () => {
+  if (failure !== undefined) return;
+  observeSamplerGap();
+  try {
+    if (process.memoryUsage().heapUsed >= v8.getHeapStatistics().heap_size_limit * 0.5) {
+      exitSkipped = "near heap limit";
+      if (!persist()) stopWithFailure("could not write heap snapshot metadata");
+      return;
+    }
+    captureIfQualified(process.memoryUsage().heapUsed);
+    if (!persist()) stopWithFailure("could not write heap snapshot metadata");
+  } catch (error) {
+    stopWithFailure(error);
+  }
+});
+`);
+      flags.push(`--require=${quoteForNodeOptions(preloadPath)}`);
     }
     // Append, never replace: a caller (or its own environment) may already rely on NODE_OPTIONS
     // for something unrelated.
@@ -155,8 +281,58 @@ export function runCommand(options: RunOptions): Promise<RunResult> {
         .filter((f) => f.endsWith(".cpuprofile") || f.endsWith(".heapprofile"))
         .map((f) => join(scratchDir, f))
         .sort((a, b) => statSync(b).size - statSync(a).size);
-      const heapSnapshots = written.filter((f) => f.endsWith(".heapsnapshot")).map((f) => join(scratchDir, f));
-      resolvePromise({ exitCode, signal, scratchDir, profiles, heapSnapshots, heapPeakNote });
+      const heapSnapshots = written
+        .filter((f) => f.endsWith(".heapsnapshot"))
+        .map((f) => join(scratchDir, f))
+        .sort((a, b) => statSync(b).size - statSync(a).size);
+      const snapshotMetadata = written.filter((file) => /^heap-peak-\d+-\d+-[0-9a-f]{8}\.json$/.test(file)).flatMap((file) => {
+        const metadataPath = join(scratchDir, file);
+        try {
+          const metadata = JSON.parse(readFileSync(metadataPath, "utf8")) as {
+            start?: unknown;
+            peakHeapUsed?: unknown;
+            snapshotCpuTimeUs?: unknown;
+            maxSamplerGapMs?: unknown;
+            captures?: unknown;
+            threadId?: unknown;
+            target?: unknown;
+            failure?: unknown;
+            exitSkipped?: unknown;
+          };
+          if (typeof metadata.start !== "number" || typeof metadata.peakHeapUsed !== "number" || !Array.isArray(metadata.captures)) return [];
+          const path = typeof metadata.target === "string" ? metadata.target : metadataPath.replace(/\.json$/, ".heapsnapshot");
+          const threadId = typeof metadata.threadId === "number" ? metadata.threadId : 0;
+          const captures = metadata.captures.flatMap((capture) => {
+            if (typeof capture !== "object" || capture === null) return [];
+            const value = capture as { heapUsed?: unknown; cpuTimeUs?: unknown; liveAfter?: unknown };
+            return typeof value.heapUsed === "number" && typeof value.cpuTimeUs === "number"
+              ? [{ path, heapUsed: value.heapUsed, cpuTimeUs: value.cpuTimeUs, threadId, ...(typeof value.liveAfter === "number" ? { liveAfter: value.liveAfter } : {}) }]
+              : [];
+          });
+          return [{
+            start: metadata.start,
+            peakHeapUsed: metadata.peakHeapUsed,
+            cpuTimeUs: typeof metadata.snapshotCpuTimeUs === "number" ? metadata.snapshotCpuTimeUs : 0,
+            maxSamplerGapMs: typeof metadata.maxSamplerGapMs === "number" ? metadata.maxSamplerGapMs : 0,
+            failure: typeof metadata.failure === "string" ? metadata.failure : undefined,
+            exitSkipped: typeof metadata.exitSkipped === "string" ? metadata.exitSkipped : undefined,
+            captures,
+          }];
+        } catch {
+          return [];
+        }
+      });
+      const heapSnapshotCaptures = snapshotMetadata.flatMap((metadata) => metadata.captures);
+      const heapSnapshotStats = options.heapSnapshot ? {
+        snapshotsWritten: heapSnapshotCaptures.length,
+        peakHeapUsed: snapshotMetadata.reduce((peak, metadata) => Math.max(peak, metadata.peakHeapUsed), 0),
+        maxGrowth: snapshotMetadata.reduce((growth, metadata) => Math.max(growth, metadata.peakHeapUsed - metadata.start), 0),
+        cpuTimeUs: snapshotMetadata.reduce((total, metadata) => total + metadata.cpuTimeUs, 0),
+        maxSamplerGapMs: snapshotMetadata.reduce((gap, metadata) => Math.max(gap, metadata.maxSamplerGapMs), 0),
+        errors: snapshotMetadata.flatMap((metadata) => metadata.failure === undefined ? [] : [metadata.failure]),
+        exitSkipped: snapshotMetadata.flatMap((metadata) => metadata.exitSkipped === undefined ? [] : [metadata.exitSkipped]),
+      } : undefined;
+      resolvePromise({ exitCode, signal, scratchDir, profiles, heapSnapshots, heapPeakNote, heapSnapshotCaptures, heapSnapshotStats });
     });
   });
 }

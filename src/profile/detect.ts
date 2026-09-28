@@ -1,8 +1,11 @@
-// Responsibility: tell a .cpuprofile from a .heapprofile by shape, not by file extension -
+// Responsibility: identify V8 profile kinds from a small prefix or an already-parsed JSON shape.
 // `run` writes files without trusting a caller-supplied name, and a renamed fixture must still work.
-// Boundary: does not parse either format; profile/cpu.ts and profile/heap.ts do that.
+// Boundary: does not parse any format; profile/cpu.ts, profile/heap.ts, and
+// profile/heapsnapshot.ts own their format-specific validation.
 
-export type ProfileKind = "cpu" | "heap";
+import { closeSync, openSync, readSync } from "node:fs";
+
+export type ProfileKind = "cpu" | "heap" | "heap-snapshot";
 
 /**
  * A deliberate, expected complaint about a profile file's own shape (missing nodes, a node with
@@ -24,9 +27,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * A .cpuprofile has a flat `nodes` array plus `samples`/`timeDeltas`. A .heapprofile has a
- * nested `head` node instead. Neither format carries a "kind" field of its own, so the shape
- * is the only signal.
+ * A .cpuprofile has flat nodes and samples, a .heapprofile has a nested head, and a heap snapshot
+ * has snapshot metadata. These formats carry no common kind field, so their shapes identify them.
  */
 export function detectProfileKind(json: unknown): ProfileKind {
   if (!isRecord(json)) {
@@ -38,5 +40,20 @@ export function detectProfileKind(json: unknown): ProfileKind {
   if (isRecord(json["head"]) && "callFrame" in json["head"]) {
     return "heap";
   }
-  throw new ProfileShapeError("unrecognized profile shape: expected .cpuprofile (nodes/samples) or .heapprofile (head)");
+  if (isRecord(json["snapshot"]) && isRecord(json["snapshot"]["meta"])) return "heap-snapshot";
+  throw new ProfileShapeError("unrecognized profile shape: expected .cpuprofile, .heapprofile, or .heapsnapshot");
+}
+
+export function detectProfileFileKind(path: string): ProfileKind | undefined {
+  if (path.toLowerCase().endsWith(".heapsnapshot")) return "heap-snapshot";
+  const fd = openSync(path, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    const length = readSync(fd, buffer, 0, buffer.length, 0);
+    const prefix = buffer.toString("utf8", 0, length).replace(/^\s+/, "");
+    if (prefix.startsWith('{"snapshot":{"meta":')) return "heap-snapshot";
+    return undefined;
+  } finally {
+    closeSync(fd);
+  }
 }

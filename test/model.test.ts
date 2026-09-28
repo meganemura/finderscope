@@ -63,6 +63,46 @@ test("a real file outside --root is still \"own\", printed with its absolute pat
   assert.equal(fn.key, "leaf /somewhere/else/lib.js:1:1");
 });
 
+test("an injected preload is a finderscope frame, not own code", () => {
+  const json = profileWithFrames([
+    { functionName: "(root)", url: "" },
+    { functionName: "sample", url: "file:///tmp/finderscope-abcd/heap-snapshot-preload.cjs" },
+  ]);
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
+  const fn = [...analysis.functions.values()].find((entry) => entry.name === "sample")!;
+  assert.equal(fn.area, "finderscope");
+  assert.equal(buildSummary(analysis, "profile.cpuprofile").topDown.length, 0);
+});
+
+test("do: does not target work reached only through finderscope's injected preload", () => {
+  const json = {
+    nodes: [
+      {
+        id: 0,
+        callFrame: { functionName: "(root)", url: "", lineNumber: 0, columnNumber: 0 },
+        children: [1],
+      },
+      {
+        id: 1,
+        callFrame: { functionName: "capture", url: "file:///tmp/finderscope-abcd/heap-snapshot-preload.cjs", lineNumber: 0, columnNumber: 0 },
+        children: [2],
+      },
+      {
+        id: 2,
+        callFrame: { functionName: "writeHeapSnapshot", url: "node:v8", lineNumber: 90, columnNumber: 26 },
+        children: [],
+      },
+    ],
+    samples: [2, 2],
+    timeDeltas: [0, 100, 100],
+  };
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
+  assert.equal(
+    buildSummary(analysis, "profile.cpuprofile").do,
+    "finderscope top 'profile.cpuprofile'",
+  );
+});
+
 test("a node: url is area \"node\" regardless of path shape", () => {
   const json = profileWithFrames([
     { functionName: "(root)", url: "" },

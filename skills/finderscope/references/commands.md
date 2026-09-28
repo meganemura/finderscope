@@ -6,6 +6,9 @@ Every text report ends with one runnable `do:` command. Use `--json` when anothe
 
 `finderscope '<profile>' [--root dir] [--from ms --to ms] [--json]`
 
+For a heap snapshot, `finderscope '<snapshot>' [-n N] [--json]` ranks constructors by self size.
+`-n` expands the collapsed single-retainer list.
+
 The summary shows your code top-down, areas, ranked functions, hot paths, and the next command.
 `--root` shortens paths below the directory. It does not change area classification.
 `--from` and `--to` select a half-open time window in decimal milliseconds from the first sample.
@@ -19,6 +22,15 @@ Give both window flags together. They work with CPU profiles.
 `--by root` ranks the roots from `your code, top down`.
 `--area` selects one area, such as `own`, `node`, or a package name.
 `-n` sets a positive result limit.
+
+For a `.heapsnapshot`, use `--by retained`, `--by self`, or `--by count`. The default is self.
+
+## Retainers
+
+`finderscope retainers '<snapshot>' '<constructor-or-#id>' [-n N] [--json]`
+
+This command shows bounded paths from the GC root into one constructor group or object.
+Every constructor key and `#id` printed by a snapshot report works as the argument.
 
 ## Callers
 
@@ -53,11 +65,21 @@ This command ranks changes in function share and area share. Both profiles must 
 
 ## Run
 
-`finderscope run [--heap] [--heap-peak] [--root dir] -- <command...>`
+`finderscope run [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-threshold percent] [--heap-snapshot-min MB] [--exit-on-signal] [--root dir] -- <command...>`
 
 This command adds V8 profile flags to the supplied command and its Node child processes.
 `--heap` also writes a heap profile. `--heap-peak` requests a snapshot near a configured heap limit.
 Pass a heap cap to Node when you use `--heap-peak`, such as `--max-old-space-size=<MiB>`.
+`--heap-snapshot` keeps one snapshot near the observed `heapUsed` peak. Its default threshold is
+25%, and its default minimum growth is 64 MB. Change the floor with `--heap-snapshot-min`.
+The result always reports the observed outcome and the CPU time used to write snapshots.
+Writing a snapshot pauses the process and can need about the heap size in extra memory.
+The sampler checks again at process exit. A gap above one second warns that synchronous work can
+hide a peak and names `run --heap-peak` plus an explicit `v8.writeHeapSnapshot()` as the remedy.
+`--exit-on-signal` lets catchable termination signals flush a Node CPU profile. A program signal
+listener gets two seconds to finish before finderscope exits with the signal code. A synchronous process cannot run this JavaScript listener until it yields, so the
+flag can delay termination. SIGKILL still ends the process. An all-idle result supplies a rerun
+with `--exit-on-signal`.
 `--root` shortens paths in each summary. The command also accepts `--json`.
 
 ## Timeline

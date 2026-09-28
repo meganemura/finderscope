@@ -8,8 +8,9 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
 import * as hegel from "@hegeldev/hegel";
+import * as gs from "@hegeldev/hegel/generators";
 import { parseCpuProfile } from "../src/profile/cpu.js";
-import { analyzeCpuProfile } from "../src/model.js";
+import { analyzeCpuProfile, classifyScriptArea } from "../src/model.js";
 import { drawCpuProfileJson } from "./helpers/profile-gen.js";
 
 test(
@@ -31,6 +32,14 @@ test(
   },
   20_000,
 );
+
+test("injected preload paths are always classified outside own code", () =>
+  hegel.test((tc) => {
+    const suffix = tc.draw(gs.text({ alphabet: "abcdefghijklmnopqrstuvwxyz0123456789", minSize: 1, maxSize: 20 }));
+    const name = tc.draw(gs.sampledFrom(["heap-snapshot-preload.cjs", "signal-exit-preload.cjs"]));
+    const path = `/tmp/finderscope-${suffix}/${name}`;
+    assert.equal(classifyScriptArea(path), "finderscope");
+  }, { testCases: 100 }));
 
 test(
   "sum(self) == profile total",

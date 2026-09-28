@@ -247,6 +247,20 @@ function isFileUrl(url: string): boolean {
   return url.startsWith("file://") || isAbsolute(url);
 }
 
+function isFinderscopePreloadPath(path: string): boolean {
+  return /(?:^|[/\\])finderscope-[^/\\]+[/\\](?:heap-snapshot|signal-exit)-preload\.cjs$/.test(path);
+}
+
+export function classifyScriptArea(url: string): string {
+  if (url === "") return "native";
+  if (url.startsWith("node:")) return "node";
+  if (url.startsWith("wasm:")) return "wasm";
+  if (!isFileUrl(url)) return "eval";
+  const path = localize(url);
+  if (isFinderscopePreloadPath(path)) return "finderscope";
+  return classifyPath(path, path).area;
+}
+
 /**
  * Function key = `name path:line:col`, 1-based, after source mapping (design.md), with `path`
  * shortened by area (classifyPath's `displayPath`) so the key is what's actually printed - a
@@ -304,7 +318,9 @@ export function classify(node: GenericNode, projectRoot: string, mapper: SourceM
     outColumn = column + 1;
   }
 
-  const { area, displayPath } = fromUrl ? classifyMappedSourceUrl(rawPath) : classifyPath(rawPath, projectRoot);
+  const classified = fromUrl ? classifyMappedSourceUrl(rawPath) : classifyPath(rawPath, projectRoot);
+  const area = isFinderscopePreloadPath(rawPath) ? "finderscope" : classified.area;
+  const displayPath = classified.displayPath;
   const key = `${name} ${displayPath}:${outLine}:${outColumn}`;
   const result: ClassifyResult = { key, name, area };
   if (!fromUrl) {

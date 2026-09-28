@@ -22,10 +22,12 @@ Inputs:
   (`nodes`), a sample list (`samples`), and the time between samples (`timeDeltas`).
 - `.heapprofile`: the JSON that `node --heap-prof` writes. It holds a call tree with the sampled
   bytes still live when the profile was written, per frame (`selfSize`).
+- `.heapsnapshot`: the object graph that Node and Chrome write. It holds every heap node and edge,
+  plus optional closure locations. finderscope streams its large arrays instead of parsing the
+  complete file as one JavaScript string.
 
-Later, not now: the `--prof` tick log, and `.heapsnapshot`. A tick log needs V8's own log format.
-A heap snapshot can be several gigabytes and needs a streaming dominator-tree pass. Both are
-separate designs.
+The `--prof` tick log will not be added. `--cpu-prof` gives the same sampled call tree in a format
+finderscope already reads. Supporting V8's separate tick-log format would add no new answer.
 
 finderscope does not draw anything, does not open a network connection, and does not change the
 profiled program.
@@ -36,11 +38,14 @@ profiled program.
 |---|---|
 | `finderscope <profile> [--from ms --to ms]` | The summary: your code top down, split by area, top functions by self and by total, the hottest call paths, and a `do:` line. |
 | `finderscope top <profile> [--by self\|total\|root] [--area <area>] [--from ms --to ms] [-n N]` | A longer ranked list - `--by root` ranks "your code, top down"'s own roots. |
+| `finderscope <snapshot> [-n N]` | The heap summary; `-n` expands its single-retainer list. |
+| `finderscope top <snapshot> [--by retained\|self\|count] [-n N]` | A longer constructor list for a heap snapshot; self is the default. |
+| `finderscope retainers <snapshot> <constructor-or-#id>` | Bounded retaining paths into one constructor group or object. |
 | `finderscope callers <profile> <function> [--from ms --to ms]` | Which call paths lead to the function, with each path's share. |
 | `finderscope callees <profile> <function> [--from ms --to ms]` | Where the function's own total time goes. |
 | `finderscope lines <profile> <function> [--from ms --to ms]` | The hot lines inside the function's own body, from V8's own per-line sample counts. |
 | `finderscope diff <before> <after>` | The functions and areas whose share changed most, sorted by the size of the change. |
-| `finderscope run [--heap] [--heap-peak] -- <command...>` | Runs the command with `--cpu-prof` (and `--heap-prof`) in a scratch directory, then prints the summary for each profile it wrote. |
+| `finderscope run [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-min MB] [--exit-on-signal] -- <command...>` | Runs the command with profiling enabled, then prints each report it wrote. |
 | `finderscope timeline <profile>` | 20 equal time buckets across a cpu profile, each with the top own function by self time - lets an agent pick a `--from`/`--to` window before it exists to guess one. |
 | `finderscope --help` / `-h` / `help` | The usage of every command in one screen. `finderscope <command> --help` prints just that command's own usage. |
 
@@ -95,10 +100,8 @@ is the caller's cwd and a real snapshot can be well over 100MB) - but ONLY when 
 caps the heap itself (`--max-old-space-size`, checked against the command's own argv and the
 existing `NODE_OPTIONS`): without a cap, V8 never approaches a heap LIMIT at all, so the flag would
 sit there and never fire. `--heap-peak` with no cap adds nothing and says so in a `note:`, rather
-than silently doing nothing and looking like it worked. finderscope does not read a `.heapsnapshot`
-itself (a full snapshot needs a streaming dominator-tree pass - a separate design, per "Scope of
-the first version" above); `run` only reports the path it landed at, for an agent to open in Chrome
-DevTools' own Memory panel.
+than silently doing nothing and looking like it worked. Every snapshot then goes through the same
+streaming summary as a snapshot passed directly on the command line.
 
 ## How the report reads
 
@@ -128,7 +131,7 @@ DevTools' own Memory panel.
   whether or not it is under `--root`; `--root` only shortens the printed path when the file is
   under it, and does not change which area it belongs to), `<package>` (a package under
   `node_modules`, with the scope kept, for example `@scope/name`), `node` (`node:` internals),
-  `gc`, `idle`, `program` (V8's own bookkeeping), `wasm` (a `wasm:` url), `eval` (any other
+  `finderscope` (injected preload work), `gc`, `idle`, `program` (V8's own bookkeeping), `wasm` (a `wasm:` url), `eval` (any other
   nonempty url that is not a real file - `[eval]`, `evalmachine.<anonymous>`, and similar), and
   `native` (an empty url - a V8 builtin with no source position at all).
 - Self time is the time of the samples whose top frame is the function. Total time is the time of the
@@ -230,11 +233,89 @@ DevTools' own Memory panel.
   (`native`), not about which package sat in between. `finderscope callees A` shows the full path
   through `lodash` to get there.
 
+## Heap snapshot analysis
+
+The parser reads the header first and allocates typed arrays from `node_count` and `edge_count`.
+It streams `nodes`, `edges`, `locations`, and `strings`. Strings longer than 200 characters become
+a length-and-hash placeholder. The parser never passes the complete snapshot to `JSON.parse`.
+
+The graph excludes weak edges. A shortcut edge participates only when it starts at the GC root.
+An iterative depth-first pass produces post-order. Cooper-Harvey-Kennedy iteration computes the
+immediate dominator of each reachable node. An unreachable node attaches to the root. Retained
+size is the node's self size plus every dominated subtree. A constructor group's retained size is
+the sum of its dominator roots, so a same-group object dominated by another group member is not
+counted twice.
+
+The summary shows 10 constructor groups ranked by self size and 5 individual retainers. It keeps
+the retained column. A retainer whose child keeps at least 95% of its retained size yields its row
+to the deepest such child. `-n` expands this object list. Each path has at most 8 nodes from the
+root. A cut path prints a `retainers` command for the first visible node after the hidden prefix.
+`top` shows 30 groups by default and
+defaults to self size. `retainers` shows 5 objects by default. A constructor key and a `#<V8 node
+id>` key round-trip unchanged. Closure areas appear
+only when the location table can resolve a script path. CPU-only windows, `lines`, and `timeline`
+return an error with a runnable snapshot command. Snapshot `diff` is deferred because retained-size
+and count deltas require a different row shape from the existing share-only diff.
+All three snapshot reports cap `-n` at 500. A cut doubles the shown count, with a minimum target
+of 50 and a maximum of 500. At the cap, the continuation selects the largest listed retainer.
+
+On a 726,162,038-byte (0.676 GiB) snapshot, `process.resourceUsage().maxRSS` measured 1.453 GiB
+before the bounded decoder and phase releases. It measured 1.366 GiB after them, or 2.02 GiB of
+RSS per GiB of snapshot.
+
+`run --heap-snapshot` preloads a timer into each Node thread. The timer is unreferenced. A capture
+requires the configured minimum growth from startup and the configured growth over the last
+capture. The defaults are 64 MB and 25%. `--heap-snapshot-min` changes the minimum. The preload
+checks the same conditions in an exit listener. This check covers synchronous allocations that
+remain live when the process exits. It can delay exit by seconds on a large heap. The listener
+skips the write when `heapUsed` is at least half of the V8 heap limit. Each Node thread writes its
+own replacement file. The report
+always prints the observed peak, capture count, and snapshot-writing CPU time. It also records the
+longest interval between sampler checks. An interval above one second adds a note that synchronous
+work can hide a peak. The note directs the user to locate the peak with `run --heap-peak` and call
+`v8.writeHeapSnapshot()` at that location. The `finderscope` area contains the preload files and
+stays outside the "your code" sections. Summary `do:` targets have a sampled route that stays
+outside that area. Snapshot writing pauses the program and can need about the heap size in extra
+memory. A preload error stops sampling and becomes a report note instead of changing the program.
+
+`run --exit-on-signal` preloads signal handlers into each Node process. An otherwise unhandled
+SIGTERM, SIGINT, or SIGHUP calls `process.exit` with the conventional `128 + signal` code, which
+lets V8 flush the CPU profile. If the program adds its own listener, finderscope gives it two
+seconds to finish. It then exits with the conventional code if the process is still alive. A
+slower graceful shutdown is cut off. A process in synchronous code cannot run the JavaScript signal listener until it yields,
+so the flag can delay termination. SIGKILL still ends that process and cannot be caught. Without
+the flag, Node keeps its default signal behavior. When every CPU profile is at least 80% idle, the
+report names missing Node work and supplies a shell-quoted rerun with `--exit-on-signal`.
+
 ## JSON shape
 
 One block per command, with a small real example each (from `test/fixtures/tiny.cpuprofile`,
 `--root /project`, values abbreviated with `...` where a real run has more entries). Every command
 below also shares the top-level `unit` field described above.
+
+`finderscope <snapshot> --json`:
+```json
+{
+  "metric": "heap-snapshot", "unit": "bytes", "total": 80,
+  "constructors": [{ "key": "Map", "type": "object", "name": "Map", "count": 1,
+    "self": 40, "retained": 80, "share": 1 }],
+  "constructorsCut": 0,
+  "retainers": [{ "key": "#3", "constructor": "Map", "self": 40, "retained": 80,
+    "path": [{ "key": "#1", "constructor": "(synthetic)" },
+      { "key": "#3", "constructor": "Map", "edge": "map" }] }],
+  "retainersCut": 0,
+  "areas": [{ "area": "own", "count": 1, "self": 64, "share": 0.8 }],
+  "areasCut": 0,
+  "do": "finderscope retainers '<snapshot>' '#3'"
+}
+```
+
+`finderscope top <snapshot> --by retained --json` uses
+`{ "metric", "unit", "by", "total", "entries", "cut", "do" }`. Each entry has the constructor
+shape above. `finderscope retainers <snapshot> <key> --json` uses
+`{ "metric", "unit", "target", "total", "objects", "cut", "do" }`. Each object has the retainer
+shape above. `retainersMore` appears only when `retainersCut` is nonzero and contains the same
+summary command with a larger `-n`.
 
 `finderscope <profile> --json` (the summary):
 ```json
@@ -377,26 +458,42 @@ each profile's own total changed):
 }
 ```
 
-`finderscope run --json [--heap] [--heap-peak] -- <command...>`:
+`finderscope run --json [--heap] [--heap-peak] [--heap-snapshot] [--exit-on-signal] -- <command...>`:
 ```json
 {
   "scratchDir": "/tmp/finderscope-xxxxxx",
   "profiles": [ /* one full summary object per profile written, largest total first */ ],
   "errors": [{ "profile": "<path>", "error": "<message>", "do": "<command>" }],
   "heapSnapshots": [ "/tmp/finderscope-xxxxxx/Heap.....heapsnapshot" ],
+  "heapSnapshotCaptures": [{ "path": "/tmp/finderscope-xxxxxx/heap-peak-123-1-a1b2c3d4.heapsnapshot", "heapUsed": 90000000, "cpuTimeUs": 1200000, "liveAfter": 88000000, "threadId": 1 }],
+  "heapSnapshotStats": { "snapshotsWritten": 1, "peakHeapUsed": 90000000, "maxGrowth": 70000000, "cpuTimeUs": 1200000, "maxSamplerGapMs": 2030, "errors": [], "exitSkipped": [] },
+  "heapSnapshotNote": "1 heap snapshot written; snapshot writing used 1.2s CPU time ...",
+  "heapSnapshotGapNote": "the heap sampler could not run for 2.0s at a time ...",
+  "heapSnapshotGarbageNote": "the snapshot holds about 4.2MB of live objects, but heapUsed was 265.3MB at capture ...",
+  "heapSnapshotErrorNote": "heap snapshot sampling stopped after an error: <message>",
+  "heapSnapshotExitNote": "the exit-time heap snapshot was skipped near the heap limit",
   "do": "<the first profile's own do:, or a fallback>"
 }
 ```
-`heapSnapshots` is `[]` unless `--heap-peak` actually wrote one (see `run --heap-peak` above) -
-finderscope never reads this file itself. `heapPeakNote` appears only when `--heap-peak` was given
-but the command had no heap cap for it to work with. When the command crashes before it can write
-a normal profile but a heap snapshot near the limit WAS written, `do` (and `warning`) point at that
-snapshot directly, never at "rerun without sending it a signal" (nothing finderscope did sent one).
-When the command wrote no profile at all (it never ran node, or it ended via a forwarded signal
-before V8 could write one - see noProfileWarning()), `profiles` and `errors` are both `[]` and an
+`heapSnapshots` contains snapshots from either collection mode. `heapSnapshotCaptures` records
+each capture, its thread id, and its write CPU time. `heapSnapshotStats` and `heapSnapshotNote` appear when the
+sampler was requested, including when no snapshot qualified. `maxSamplerGapMs` is the longest
+interval between sampler checks. `heapSnapshotGapNote` appears when that interval exceeds one
+second. Each capture also records `liveAfter`, the `heapUsed` right after the write. The write
+collects garbage first, so this value is close to the live heap the file holds.
+`heapSnapshotGarbageNote` appears when a capture's `liveAfter` is below half of its `heapUsed`: the
+file then misses most of what was counted, and the note points at `run --heap-peak`.
+`heapSnapshotErrorNote` reports the first sampler error. `heapSnapshotExitNote` reports a skipped
+exit write near the heap limit.
+When no snapshot qualifies, `do` lowers the floor.
+`heapPeakNote` appears only when `--heap-peak` was given but the command had no heap cap.
+When the command crashes before it can write a normal profile but a snapshot was written, the
+snapshot summary still supplies the final `do:` command.
+When the command wrote no profile at all (it never ran Node, used a native child, or ended with
+SIGKILL), `profiles` and `errors` are both `[]` and an
 extra `warning` field, a plain string explaining why, appears alongside `do`:
 ```json
-{ "scratchDir": "/tmp/finderscope-xxxxxx", "profiles": [], "errors": [], "heapSnapshots": [], "warning": "<why>", "do": "<command>" }
+{ "scratchDir": "/tmp/finderscope-xxxxxx", "profiles": [], "errors": [], "heapSnapshots": [], "heapSnapshotCaptures": [], "warning": "<why>", "do": "<command>" }
 ```
 
 `finderscope timeline <profile> --json`:

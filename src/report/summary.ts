@@ -74,7 +74,7 @@ export function isSpecialFrame(key: string): boolean {
 // Every area that is not a real dependency: own code, V8/node bookkeeping, and the three areas a
 // frame with no real file on disk can land in (model.ts's classify()) - none of these should ever
 // trigger the "a package dominates" do: rule below.
-const NON_PACKAGE_AREAS = new Set(["own", "node", "gc", "idle", "program", "wasm", "eval", "native"]);
+const NON_PACKAGE_AREAS = new Set(["own", "finderscope", "node", "gc", "idle", "program", "wasm", "eval", "native"]);
 
 export interface RankedEntry {
   key: string;
@@ -170,6 +170,25 @@ function chooseDo(
 ): string {
   const total = analysis.total;
   const share = (value: number): number => (total > 0 ? value / total : 0);
+  const targetableKeys = new Set<string>();
+  for (const path of analysis.paths) {
+    let crossedFinderscope = false;
+    for (const key of path.keys) {
+      const area = analysis.functions.get(key)?.area;
+      if (area === "finderscope") {
+        crossedFinderscope = true;
+      } else if (!crossedFinderscope) {
+        targetableKeys.add(key);
+      }
+    }
+  }
+  const canTarget = (key: string): boolean => {
+    const fn = analysis.functions.get(key);
+    if (fn === undefined || fn.area === "finderscope") return false;
+    // A Node or package frame can still be finderscope's own work. Accept the function only when
+    // at least one sampled route reaches an occurrence without crossing an injected preload.
+    return targetableKeys.has(key);
+  };
 
   // A hand-off's fromKey is always an "own" frame by construction (model.ts's computeHandoffs),
   // so it can never be a special frame - no filter needed here.
@@ -178,7 +197,7 @@ function chooseDo(
     .sort((a, b) => b[1] - a[1])[0]?.[0];
   if (topNonOwnArea !== undefined) {
     const topHandoff = handoffsByArea.get(topNonOwnArea)?.[0];
-    if (topHandoff !== undefined && share(topHandoff.value) >= HANDOFF_DO_MIN_SHARE) {
+    if (topHandoff !== undefined && canTarget(topHandoff.key) && share(topHandoff.value) >= HANDOFF_DO_MIN_SHARE) {
       return `finderscope callees ${shQuote(profilePath)} ${shQuote(topHandoff.key)}${windowArgs}`;
     }
   }
@@ -190,7 +209,7 @@ function chooseDo(
   // Node build, or a heap profile) or a function this profile happened to record none for would
   // otherwise get pointed at a command whose only answer is a `note:`, not a real next step.
   const topOwnSelf = [...analysis.functions.values()]
-    .filter((f) => f.area === "own")
+    .filter((f) => f.area === "own" && canTarget(f.key))
     .sort((a, b) => b.self - a.self)[0];
   if (
     topOwnSelf !== undefined &&
@@ -201,11 +220,13 @@ function chooseDo(
     return `finderscope lines ${shQuote(profilePath)} ${shQuote(topOwnSelf.key)}${windowArgs}`;
   }
 
-  const topSelf = bySelf.find((f) => !isSpecialFrame(f.key));
+  const topSelf = bySelf.find((f) => !isSpecialFrame(f.key) && canTarget(f.key));
   if (topSelf !== undefined && total > 0 && topSelf.share >= 0.2) {
     return `finderscope callers ${shQuote(profilePath)} ${shQuote(topSelf.key)}${windowArgs}`;
   }
-  const topArea = [...analysis.areaTotals.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+  const topArea = [...analysis.areaTotals.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .find(([area]) => [...analysis.functions.values()].some((fn) => fn.area === area && canTarget(fn.key)))?.[0];
   if (topArea !== undefined && !NON_PACKAGE_AREAS.has(topArea)) {
     return `finderscope top ${shQuote(profilePath)} --area ${shQuote(topArea)}${windowArgs}`;
   }
