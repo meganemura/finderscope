@@ -1,6 +1,6 @@
 {
   "name": "finderscope",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Turn V8 CPU and heap profiles into short, ranked reports with runnable next commands for coding agents.",
   "keywords": [
     "profiling",
