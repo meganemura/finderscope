@@ -9,7 +9,13 @@ may change commands, flags, or output shapes. The version entry will describe ea
 
 - The default summary and `top` rank own functions by caused cost. Each sample belongs to its
   deepest own frame. Rows include self cost, the three largest non-own entry calls, and one
-  bounded own caller chain. Recursive caller copies collapse into one marked hop.
+  bounded own caller chain. Recursive caller copies collapse into one marked hop. An anonymous
+  entry prints with its file and line, and entries that would print alike merge in the text.
+- The summary ends with the time no own function caused, by area (module loading, gc, idle, and
+  others). The previous "your code by total", "where your code hands off", "hottest paths", and
+  top-down tree sections left the default; `callees`, `callers`, `top --by self|total`, and
+  `--paths` still answer those questions.
+- `run` folds a profile that is at least 80% idle into one line with a command that opens it.
 - `callers` on a non-own function groups paths by the nearest own frame. `--direct` restores the
   direct caller tree.
 - `run` captures child output, prints bounded tails, and writes `report.txt` or `report.json` in
