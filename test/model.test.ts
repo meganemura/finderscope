@@ -71,7 +71,7 @@ test("an injected preload is a finderscope frame, not own code", () => {
   const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
   const fn = [...analysis.functions.values()].find((entry) => entry.name === "sample")!;
   assert.equal(fn.area, "finderscope");
-  assert.equal(buildSummary(analysis, "profile.cpuprofile").topDown.length, 0);
+  assert.equal(buildSummary(analysis, "profile.cpuprofile").fixCandidates.length, 0);
 });
 
 test("do: does not target work reached only through finderscope's injected preload", () => {
@@ -101,6 +101,32 @@ test("do: does not target work reached only through finderscope's injected prelo
     buildSummary(analysis, "profile.cpuprofile").do,
     "finderscope top 'profile.cpuprofile'",
   );
+});
+
+test("the breakdown line names an anonymous entry by file and line, and merges entries that print alike", () => {
+  // run (own) calls three package functions: an anonymous one, and two distinct functions that
+  // share the name "walk". Each gets two samples.
+  const frame = (id: number, functionName: string, url: string, lineNumber: number, children: number[]) =>
+    ({ id, callFrame: { functionName, url, lineNumber, columnNumber: 0 }, children });
+  const json = {
+    nodes: [
+      frame(0, "(root)", "", 0, [1]),
+      frame(1, "run", "file:///project/src/run.js", 0, [2, 3, 4]),
+      frame(2, "", "file:///project/node_modules/pkg/lib/core.js", 41, []),
+      frame(3, "walk", "file:///project/node_modules/pkg/lib/a.js", 0, []),
+      frame(4, "walk", "file:///project/node_modules/pkg/lib/b.js", 0, []),
+    ],
+    samples: [2, 2, 3, 3, 4, 4],
+    timeDeltas: [0, 100, 100, 100, 100, 100, 100],
+  };
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
+  const summary = buildSummary(analysis, "profile.cpuprofile");
+  // JSON keeps one entry per function, so every key still round trips.
+  assert.equal(summary.fixCandidates[0]!.entries.length, 3);
+  const text = formatSummaryText(summary, "profile.cpuprofile");
+  const breakdown = text.split("\n").find((line) => line.includes("pkg ") && line.includes("walk"))!;
+  assert.match(breakdown, /pkg \(anonymous\) core\.js:42 /);
+  assert.equal(breakdown.match(/pkg walk /g)?.length, 1);
 });
 
 test("a node: url is area \"node\" regardless of path shape", () => {
@@ -329,13 +355,9 @@ test("do: never targets a special frame - an all-idle profile falls back to the 
   assert.equal(data.do, "finderscope top 'profile.cpuprofile'");
 });
 
-// Regression: summary's own-self "prefer lines" rule (report/summary.ts) must gate on
-// analysis.lineSelfTimes.has(key), not merely on the own function's self share - otherwise a
-// profile that never had positionTicks at all still got pointed at a `lines` command whose only
-// real answer is a `note:`, not a next step. This own function alone holds 100% of self time
-// (well past the rule's 10% bar) with NO positionTicks anywhere in the profile, so the older
-// "point at its callers" rule must fire instead.
-test("do: never prefers lines when the profile has no positionTicks at all, even past the 10% bar", () => {
+// The default workflow always opens the first fix candidate. `lines` supplies its own bounded
+// fallback when V8 did not record positionTicks, so the summary must not branch on data presence.
+test("summary points at the first candidate's lines even when the profile has no positionTicks", () => {
   const json = profileWithFrames([
     { functionName: "(root)", url: "" },
     { functionName: "hot", url: "file:///project/src/a.js" },
@@ -343,13 +365,12 @@ test("do: never prefers lines when the profile has no positionTicks at all, even
   const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
   assert.equal(analysis.lineSelfTimes.size, 0, "expected no positionTicks anywhere in this profile");
   const data = buildSummary(analysis, "profile.cpuprofile");
-  assert.equal(data.do, "finderscope callers 'profile.cpuprofile' 'hot src/a.js:1:1'");
+  assert.equal(data.do, "finderscope lines 'profile.cpuprofile' 'hot src/a.js:1:1'");
 });
 
-// Same gate, for a heap profile specifically: a .heapprofile never has a positionTicks concept at
-// all (profile/heap.ts's own node shape has no such field), so lineSelfTimes is always empty and
-// summary's `do:` must never suggest `lines` for one.
-test("do: never suggests lines for a heap profile", () => {
+// Heap profiles have no positionTicks. The same stable workflow still applies because `lines`
+// reports that limit and falls back without making the printed command invalid.
+test("heap summary also points at the first candidate's lines", () => {
   const json = {
     head: {
       id: 0,
@@ -367,5 +388,36 @@ test("do: never suggests lines for a heap profile", () => {
   const analysis = analyzeHeapProfile(parseHeapProfile(json), { root: "/project" });
   assert.equal(analysis.lineSelfTimes.size, 0);
   const data = buildSummary(analysis, "profile.heapprofile");
-  assert.doesNotMatch(data.do, /^finderscope lines /, `expected a heap profile's do: to never suggest lines, got: ${data.do}`);
+  assert.equal(data.do, "finderscope lines 'profile.heapprofile' 'alloc src/a.js:1:1'");
+});
+
+test("summary bounds entry detail while JSON keeps full entry keys", () => {
+  const names = [
+    "firstDependencyFunctionWithAnExcessivelyLongName",
+    "secondDependencyFunctionWithAnExcessivelyLongName",
+    "thirdDependencyFunctionWithAnExcessivelyLongName",
+    "fourthDependencyFunctionWithAnExcessivelyLongName",
+  ];
+  const json = {
+    nodes: [
+      { id: 0, callFrame: { functionName: "(root)", url: "", lineNumber: 0, columnNumber: 0 }, children: [1] },
+      { id: 1, callFrame: { functionName: "candidate", url: "file:///project/src/a.js", lineNumber: 0, columnNumber: 0 }, children: [2, 3, 4, 5] },
+      ...names.map((functionName, index) => ({
+        id: index + 2,
+        callFrame: { functionName, url: `file:///project/node_modules/pkg-${index}/index.js`, lineNumber: 0, columnNumber: 0 },
+        children: [],
+      })),
+    ],
+    samples: [2, 3, 4, 5, 2],
+    timeDeltas: [0, 1000, 1000, 1000, 1000],
+  };
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
+  const data = buildSummary(analysis, "profile.cpuprofile");
+  assert.equal(data.fixCandidates[0]!.entries.length, 3);
+  assert.equal(data.fixCandidates[0]!.entriesCut, 1);
+  assert.match(data.fixCandidates[0]!.entries[0]!.key, /DependencyFunctionWithAnExcessivelyLongName/);
+  const breakdown = formatSummaryText(data, "profile.cpuprofile").split("\n")[4]!;
+  assert.ok(breakdown.length <= 120, `breakdown was ${breakdown.length} characters: ${breakdown}`);
+  assert.match(breakdown, /…/);
+  assert.match(breakdown, /\+1 more/);
 });

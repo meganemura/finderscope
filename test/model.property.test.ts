@@ -11,6 +11,7 @@ import * as hegel from "@hegeldev/hegel";
 import * as gs from "@hegeldev/hegel/generators";
 import { parseCpuProfile } from "../src/profile/cpu.js";
 import { analyzeCpuProfile, classifyScriptArea } from "../src/model.js";
+import { buildTop } from "../src/report/top.js";
 import { drawCpuProfileJson } from "./helpers/profile-gen.js";
 
 test(
@@ -87,6 +88,64 @@ test(
       },
       { testCases: 200 },
     );
+  },
+  20_000,
+);
+
+test(
+  "caused values and not-caused values partition the profile total exactly",
+  () => {
+    hegel.test((tc) => {
+      const analysis = analyzeCpuProfile(parseCpuProfile(drawCpuProfileJson(tc)), { root: "/project" });
+      const caused = [...analysis.caused.values()].reduce((sum, entry) => sum + entry.value, 0);
+      const notCaused = [...analysis.notCaused.values()].reduce((sum, value) => sum + value, 0);
+      assert.equal(caused + notCaused, analysis.total);
+    }, { testCases: 200 });
+  },
+  20_000,
+);
+
+test(
+  "caused cost never exceeds the function's inclusive total",
+  () => {
+    hegel.test((tc) => {
+      const analysis = analyzeCpuProfile(parseCpuProfile(drawCpuProfileJson(tc)), { root: "/project" });
+      for (const fn of analysis.functions.values()) {
+        assert.ok(fn.caused <= fn.total, `${fn.key}: caused ${fn.caused} > total ${fn.total}`);
+      }
+    }, { testCases: 200 });
+  },
+  20_000,
+);
+
+test(
+  "entry values sum to each candidate's non-own caused cost",
+  () => {
+    hegel.test((tc) => {
+      const analysis = analyzeCpuProfile(parseCpuProfile(drawCpuProfileJson(tc)), { root: "/project" });
+      for (const candidate of analysis.caused.values()) {
+        const entries = [...candidate.entries.values()].reduce((sum, entry) => sum + entry.value, 0);
+        assert.equal(entries, candidate.value - candidate.self, candidate.key);
+      }
+    }, { testCases: 200 });
+  },
+  20_000,
+);
+
+test(
+  "top --leaf rows sum to the leaf self time reached from own code",
+  () => {
+    hegel.test((tc) => {
+      const analysis = analyzeCpuProfile(parseCpuProfile(drawCpuProfileJson(tc)), { root: "/project" });
+      for (const leaf of analysis.functions.values()) {
+        const expected = analysis.paths
+          .filter((path) => path.keys.at(-1) === leaf.key && path.keys.some((key) => analysis.functions.get(key)?.area === "own"))
+          .reduce((sum, path) => sum + path.value, 0);
+        const actual = buildTop(analysis, "profile.cpuprofile", { leaf: leaf.key, n: Number.MAX_SAFE_INTEGER }).entries
+          .reduce((sum, row) => sum + row.value, 0);
+        assert.equal(actual, expected, leaf.key);
+      }
+    }, { testCases: 200 });
   },
   20_000,
 );

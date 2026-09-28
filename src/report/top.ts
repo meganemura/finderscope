@@ -1,8 +1,6 @@
-// Responsibility: `top` - a longer ranked list, optionally filtered to one area, sorted by self,
-// by total, or (by root) by "your code, top down"'s own root value.
-// Boundary: reshapes a ProfileAnalysis (model.ts) only; does not compute self/total/area/root
-// itself - `--by root` reuses model.ts's buildTopDown, the same function the summary's own
-// "your code, top down" section builds from.
+// Responsibility: `top` - own functions by caused cost by default, with optional leaf filtering,
+// plus the earlier self, total, and first-own-root rankings behind `--by`.
+// Boundary: reshapes ProfileAnalysis only. model.ts assigns every contribution and builds roots.
 
 import type { Metric, ProfileAnalysis } from "../model.js";
 import { buildTopDown } from "../model.js";
@@ -10,12 +8,14 @@ import { formatPercent, formatValue, isSpecialFrame, metricUnit, roundShare, shQ
 
 const DEFAULT_COUNT = 10;
 
-export type TopBy = "self" | "total" | "root";
+export type TopBy = "caused" | "self" | "total" | "root";
 
 export interface TopOptions {
   by?: TopBy;
   area?: string;
   n?: number;
+  /** Resolution happens before ranking so bare-name ambiguity cannot silently change a filter. */
+  leaf?: string;
 }
 
 export interface TopEntry {
@@ -31,6 +31,7 @@ export interface TopData {
   unit: "us" | "bytes";
   by: TopBy;
   area: string | undefined;
+  leaf: string | undefined;
   total: number;
   entries: TopEntry[];
   cut: number;
@@ -46,7 +47,7 @@ export interface TopData {
 function chooseDo(sortedEntries: TopEntry[], by: TopBy, profilePath: string, windowArgs: string): string {
   const heaviest = sortedEntries.find((e) => !isSpecialFrame(e.key));
   if (heaviest === undefined) return `finderscope top ${shQuote(profilePath)}${windowArgs}`;
-  const verb = by === "self" ? "callers" : "callees";
+  const verb = by === "caused" ? "lines" : by === "self" ? "callers" : "callees";
   return `finderscope ${verb} ${shQuote(profilePath)} ${shQuote(heaviest.key)}${windowArgs}`;
 }
 
@@ -70,13 +71,23 @@ function rootEntries(analysis: ProfileAnalysis): TopEntry[] {
 }
 
 export function buildTop(analysis: ProfileAnalysis, profilePath: string, options: TopOptions, windowArgs = ""): TopData {
-  const by = options.by ?? "self";
+  const by = options.by ?? "caused";
   const n = options.n ?? DEFAULT_COUNT;
   const total = analysis.total;
   const share = (value: number): number => (total > 0 ? value / total : 0);
 
   let sortedEntries: TopEntry[];
-  if (by === "root") {
+  if (by === "caused") {
+    sortedEntries = [...analysis.caused.values()].map((entry) => {
+      let value = entry.value;
+      if (options.leaf !== undefined) {
+        value = entry.key === options.leaf ? entry.self : 0;
+        value += entry.leaves.get(options.leaf) ?? 0;
+      }
+      return { key: entry.key, area: "own", value, share: share(value) };
+    }).sort((a, b) => b.value - a.value || a.key.localeCompare(b.key));
+    if (options.area !== undefined) sortedEntries = sortedEntries.filter((entry) => entry.area === options.area);
+  } else if (by === "root") {
     // Already sorted by value, descending (buildTopDown's own rootTotals sort) - re-sorted here
     // anyway so this function does not depend on that internal ordering staying stable.
     sortedEntries = rootEntries(analysis).sort((a, b) => b.value - a.value);
@@ -110,6 +121,7 @@ export function buildTop(analysis: ProfileAnalysis, profilePath: string, options
     unit: metricUnit(analysis.metric),
     by,
     area: options.area,
+    leaf: options.leaf,
     total,
     entries,
     cut: Math.max(0, nonZeroEntries.length - n),
@@ -119,10 +131,11 @@ export function buildTop(analysis: ProfileAnalysis, profilePath: string, options
 
 export function formatTopText(data: TopData, profilePath: string, windowArgs = ""): string {
   const areaSuffix = data.area !== undefined ? ` --area ${data.area}` : "";
+  const leafSuffix = data.leaf !== undefined ? ` --leaf ${shQuote(data.leaf)}` : "";
   const lines: string[] = [
     `profile: ${profilePath}`,
     "",
-    `finderscope top${areaSuffix} (by ${data.by}, total ${formatValue(data.metric, data.total)})`,
+    `finderscope top${areaSuffix}${leafSuffix} (by ${data.by}, total ${formatValue(data.metric, data.total)})`,
     "",
   ];
   for (const e of data.entries) {
@@ -130,7 +143,7 @@ export function formatTopText(data: TopData, profilePath: string, windowArgs = "
   }
   if (data.cut > 0) {
     const shown = data.entries.length + data.cut;
-    lines.push(`  … ${data.cut} more (finderscope top ${shQuote(profilePath)}${areaSuffix} --by ${data.by} -n ${shown}${windowArgs})`);
+    lines.push(`  … ${data.cut} more (finderscope top ${shQuote(profilePath)}${areaSuffix}${leafSuffix} --by ${data.by} -n ${shown}${windowArgs})`);
   }
   lines.push("");
   lines.push(`do: ${data.do}`);

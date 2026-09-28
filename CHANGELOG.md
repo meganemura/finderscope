@@ -3,6 +3,24 @@
 The format follows Keep a Changelog, and the versions follow SemVer. Before 1.0, a minor version
 may change commands, flags, or output shapes. The version entry will describe each change.
 
+## Unreleased
+
+### Changed
+
+- The default summary and `top` rank own functions by caused cost. Each sample belongs to its
+  deepest own frame. Rows include self cost, the three largest non-own entry calls, and one
+  bounded own caller chain. Recursive caller copies collapse into one marked hop.
+- `callers` on a non-own function groups paths by the nearest own frame. `--direct` restores the
+  direct caller tree.
+- `run` captures child output, prints bounded tails, and writes `report.txt` or `report.json` in
+  its scratch directory. `--child-output inherit` restores live child output.
+- `--root` defaults to the Git top level, the nearest `package.json` directory, or the current
+  directory, in that order.
+
+### Added
+
+- `top --leaf <function>` ranks the own functions that caused one leaf's self cost.
+
 ## 0.2.0 (2026-09-28)
 
 ### Added

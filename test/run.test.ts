@@ -77,6 +77,20 @@ test("run --json prints one object with a real profile summary inside, and a rea
   assert.equal(typeof data.do, "string");
 });
 
+test("run captures bounded child tails and writes the JSON report", async () => {
+  const { io, out } = capture();
+  const script = "for(let i=0;i<12;i++)console.log('line-'+i+'-'+ 'x'.repeat(240)); console.error('problem')";
+  assert.equal(await main(["run", "--json", "--", process.execPath, "-e", script], io), 0);
+  const data = JSON.parse(out.join(""));
+  assert.equal(data.child.exitCode, 0);
+  assert.equal(data.child.stdout.tail.length, 10);
+  assert.equal(data.child.stdout.tail[0].startsWith("line-2-"), true);
+  assert.ok(data.child.stdout.tail.every((line: string) => line.length <= 200));
+  assert.deepEqual(data.child.stderr.tail, ["problem"]);
+  assert.equal(readFileSync(data.report, "utf8").includes('"profiles"'), true);
+  assert.equal(readFileSync(data.child.stdout.path, "utf8").includes("line-0-"), true);
+});
+
 test("run's text output warns, with a do:, when no profile was written", async () => {
   const { io, out } = capture();
   const code = await main(["run", "--", "true"], io);

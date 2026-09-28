@@ -17,14 +17,14 @@ npm install --save-dev finderscope
 
 ```
 finderscope <profile> [--root dir] [--from ms --to ms] [--json]
-finderscope top <profile> [--by self|total|root] [--area <area>] [--from ms --to ms] [-n N] [--json]
+finderscope top <profile> [--by caused|self|total|root] [--leaf <function>] [--area <area>] [--from ms --to ms] [-n N] [--json]
 finderscope top <snapshot> [--by retained|self|count] [-n N] [--json]
 finderscope retainers <snapshot> <constructor-or-#id> [-n N] [--json]
-finderscope callers <profile> <function> [--expand] [--paths] [--from ms --to ms] [-n N] [--json]
+finderscope callers <profile> <function> [--direct] [--expand] [--paths] [--from ms --to ms] [-n N] [--json]
 finderscope callees <profile> <function> [--expand] [--paths] [--from ms --to ms] [-n N] [--json]
 finderscope lines <profile> <function> [--from ms --to ms] [-n N] [--json]
 finderscope diff <before> <after> [-n N] [--json]
-finderscope run [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-threshold <percent>] [--heap-snapshot-min <MB>] [--exit-on-signal] [--root dir] [--json] -- <command...>
+finderscope run [--child-output capture|inherit] [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-threshold <percent>] [--heap-snapshot-min <MB>] [--exit-on-signal] [--root dir] [--json] -- <command...>
 finderscope timeline <profile> [--json]
 finderscope --help | -h | help
 ```
@@ -47,14 +47,19 @@ Every `--json` report carries a top-level `unit` (`"us"` for a cpu profile, `"by
 profile) that every value and total in it is measured in; every share is a 0..1 fraction rounded to
 3 decimal places (`0.973`). See [docs/design.md](docs/design.md) for the full JSON shape.
 
-`callers`/`callees` print a tree of direct callers/callees merged by function key (default depth
-2), not one line per distinct sample path - a hot function's time usually scatters across
-hundreds of paths that differ only in how deep they happen to go inside one package, and a flat
-list of those told an agent nothing. A non-`own` subtree collapses into one line - the area and
-the first frame entered, with its total time - instead of expanding package internals; `--expand`
-lifts that. The function's own self time is its own `(self)` row. The older flat per-path list is
-still there, behind `--paths`. A node stopped by the depth limit reports the hidden value and frame
-count, then names the command that expands it.
+The summary ranks editable functions by caused cost. Each sample belongs to its deepest `own`
+frame. The row shows self time and the three largest non-own calls that the function made.
+Each call shows its area, function name, and cost. Use `callees` to inspect deeper leaf work.
+`top` uses the same ranking by default. `top --leaf <function>` answers which own functions caused
+the selected leaf's self time. `top --by self|total|root` keeps the earlier rankings available.
+
+`callees` and `callers --direct` print trees merged by function key. The default depth is two.
+A hot function often has hundreds of sample paths. Many paths differ only in package depth.
+For a non-own target, plain `callers` groups paths by the nearest own frame. It reports the number
+of collapsed frames. A non-own subtree becomes one area and entry-frame line. `--expand` opens
+package internals. The function's self time uses a `(self)` row. `--paths` keeps the older flat
+list available. A depth limit reports the hidden value and frame count. It also names the command
+that expands the node.
 
 `lines` also lists the selected function's direct callees. It reports the source lines where each
 callee name appears as a call expression. These lines are text matches, not measured call sites.
@@ -65,42 +70,33 @@ callee name appears as a call expression. These lines are text matches, not meas
 $ finderscope run -- node test/fixtures/busy-script.js
 
 scratch dir: /tmp/finderscope-xxxxxx (kept on purpose - re-query it with finderscope callers/callees/top/retainers)
+child exit: 0
+child stdout: /tmp/finderscope-xxxxxx/child.stdout.log
+child stderr: /tmp/finderscope-xxxxxx/child.stderr.log
 
-profile: /tmp/finderscope-xxxxxx/CPU.20260101.000000.12345.0.001.cpuprofile
+command: 'node' 'test/fixtures/busy-script.js'; total 201.0ms; your code caused 199.4ms (99.2%)
 
-finderscope summary (time, total 201.0ms)
-
-your code, top down:
-   199.4ms   99.2%  (anonymous) test/fixtures/busy-script.js:1:1
-     0.3ms    0.2%    (self)
-   199.1ms   99.1%    busy test/fixtures/busy-script.js:3:14
-   199.1ms   99.1%      (self)
-
-areas:
-  own                   199.4ms  99.2%
-  idle                    1.6ms  0.8%
-
-top by self:
+fix candidates:
    199.1ms   99.1%  busy test/fixtures/busy-script.js:3:14
-     1.6ms    0.8%  (idle)
+    self 199.1ms
+    reached from: (anonymous) test/fixtures/busy-script.js:1:1
      0.3ms    0.2%  (anonymous) test/fixtures/busy-script.js:1:1
+    self 0.3ms
 
-your code by total:
-   199.4ms   99.2%  (anonymous) test/fixtures/busy-script.js:1:1
-   199.1ms   99.1%  busy test/fixtures/busy-script.js:3:14
+not caused by your code:
+  idle                  1.6ms  0.8%
 
-hottest paths:
-   199.1ms   99.1%  (anonymous) test/fixtures/busy-script.js:1:1 -> busy test/fixtures/busy-script.js:3:14
-     1.6ms    0.8%  (idle)
-     0.3ms    0.2%  (anonymous) test/fixtures/busy-script.js:1:1
-
-do: finderscope callers '/tmp/finderscope-xxxxxx/CPU.20260101.000000.12345.0.001.cpuprofile' 'busy test/fixtures/busy-script.js:3:14'
+report: /tmp/finderscope-xxxxxx/report.txt
+do: finderscope lines '/tmp/finderscope-xxxxxx/CPU.20260101.000000.12345.0.001.cpuprofile' 'busy test/fixtures/busy-script.js:3:14'
 ```
 
 Every argument in a `do:` or `… more` command - a profile path, a function key - is single-quoted,
 POSIX-style, so it survives `sh -c` unchanged whatever it contains (a space, a `$`, a backtick).
-`run`'s scratch directory is never deleted; it is the path to re-query after reading the summary,
-and SIGINT/SIGTERM are forwarded to the profiled command. With `--heap`, the report's own total is
+`run` captures child stdout and stderr in the scratch directory by default. It prints the last ten
+bounded lines from each file. `--child-output inherit` restores live output. It also writes the
+complete report to `report.txt`, or `report.json` with `--json`. The scratch directory remains
+available for later queries. `run` forwards SIGINT and SIGTERM to the profiled command. With
+`--heap`, the report's own total is
 what was still live in memory when the profiled process exited - not the peak it reached along the
 way; the `do:` line for a heap profile also points at measuring the real peak
 (`/usr/bin/time -l <command>` on macOS, or `--heapsnapshot-near-heap-limit`). `run --heap-peak`
@@ -133,6 +129,9 @@ signal code. A slower graceful shutdown is cut off. This flag can delay terminat
 synchronous code because its JavaScript signal listener cannot run until the code yields. SIGKILL
 still ends such a process and cannot be caught. An all-idle run names likely missing-work causes
 and supplies a shell-quoted rerun with `--exit-on-signal`.
+
+Without `--root`, finderscope uses the enclosing Git top level. It falls back to the nearest
+directory with `package.json`, then to the current directory.
 
 `own` means real source the agent can edit, not "under `--root`": a `file://` url or an absolute
 path outside `node_modules`, wherever it actually lives - a profiled program's own code is `own`

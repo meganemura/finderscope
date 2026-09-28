@@ -54,43 +54,20 @@ describe("finderscope summary", () => {
     assert.equal(code, 0);
     assert.equal(
       out.join(""),
-      `profile: ${CPU_FIXTURE}
+      `profile: ${CPU_FIXTURE}; total 5.4ms; your code caused 4.4ms (81.5%)
 
-finderscope summary (time, total 5.4ms)
-
-your code, top down:
-     4.4ms   81.5%  main src/main.js:10:3
-     1.0ms   18.5%    (self)
-     2.9ms   53.7%    lodash: helper lodash/index.js:15:7
-     0.5ms    9.3%    compute src/util.js:4:2
-     0.5ms    9.3%      (self)
-
-areas:
-  lodash                  2.9ms  53.7%
-  own                     1.5ms  27.8%
-  idle                    0.9ms  16.7%
-  program                 0.1ms  1.9%
-
-top by self:
-     2.9ms   53.7%  helper lodash/index.js:15:7
-     1.0ms   18.5%  main src/main.js:10:3
-     0.9ms   16.7%  (idle)
+fix candidates:
+     3.9ms   72.2%  main src/main.js:10:3
+    self 1.0ms; lodash helper 2.9ms
      0.5ms    9.3%  compute src/util.js:4:2
-     0.1ms    1.9%  (program)
+    self 0.5ms
+    reached from: main src/main.js:10:3
 
-your code by total:
-     4.4ms   81.5%  main src/main.js:10:3
-     0.5ms    9.3%  compute src/util.js:4:2
+not caused by your code:
+  idle                0.9ms  16.7%
+  program             0.1ms  1.9%
 
-where your code hands off:
-  lodash 53.7% <- main src/main.js:10:3 (53.7%)
-
-hottest paths:
-     2.9ms   53.7%  main src/main.js:10:3 -> helper lodash/index.js:15:7
-     1.0ms   18.5%  main src/main.js:10:3
-     0.9ms   16.7%  (idle)
-
-do: finderscope callees '${CPU_FIXTURE}' 'main src/main.js:10:3'
+do: finderscope lines '${CPU_FIXTURE}' 'main src/main.js:10:3'
 `,
     );
   });
@@ -100,67 +77,24 @@ do: finderscope callees '${CPU_FIXTURE}' 'main src/main.js:10:3'
     const code = await main([CPU_FIXTURE, ...ROOT, "--json"], io);
     assert.equal(code, 0);
     const data = JSON.parse(out.join(""));
-    assert.deepEqual(data, {
-      metric: "time",
-      unit: "us",
-      total: 5400,
-      topDown: [
-        {
-          key: "main src/main.js:10:3",
-          area: "own",
-          value: 4400,
-          share: 0.815,
-          isSelf: false,
-          children: [
-            { key: "(self)", area: "own", value: 1000, share: 0.185, isSelf: true, children: [], childrenCut: 0 },
-            { key: "helper lodash/index.js:15:7", area: "lodash", value: 2900, share: 0.537, isSelf: false, children: [], childrenCut: 0 },
-            {
-              key: "compute src/util.js:4:2",
-              area: "own",
-              value: 500,
-              share: 0.093,
-              isSelf: false,
-              children: [{ key: "(self)", area: "own", value: 500, share: 0.093, isSelf: true, children: [], childrenCut: 0 }],
-              childrenCut: 0,
-            },
-          ],
-          childrenCut: 0,
-        },
-      ],
-      topDownCut: 0,
-      areas: [
-        { area: "lodash", value: 2900, share: 0.537 },
-        { area: "own", value: 1500, share: 0.278 },
-        { area: "idle", value: 900, share: 0.167 },
-        { area: "program", value: 100, share: 0.019 },
-      ],
-      topSelf: [
-        { key: "helper lodash/index.js:15:7", value: 2900, share: 0.537 },
-        { key: "main src/main.js:10:3", value: 1000, share: 0.185 },
-        { key: "(idle)", value: 900, share: 0.167 },
-        { key: "compute src/util.js:4:2", value: 500, share: 0.093 },
-        { key: "(program)", value: 100, share: 0.019 },
-      ],
-      topSelfCut: 0,
-      yourCodeByTotal: [
-        { key: "main src/main.js:10:3", value: 4400, share: 0.815 },
-        { key: "compute src/util.js:4:2", value: 500, share: 0.093 },
-      ],
-      yourCodeByTotalCut: 0,
-      handoffs: [
-        {
-          area: "lodash",
-          areaShare: 0.537,
-          frames: [{ key: "main src/main.js:10:3", share: 0.537 }],
-        },
-      ],
-      paths: [
-        { segments: ["main src/main.js:10:3", "helper lodash/index.js:15:7"], value: 2900, share: 0.537 },
-        { segments: ["main src/main.js:10:3"], value: 1000, share: 0.185 },
-        { segments: ["(idle)"], value: 900, share: 0.167 },
-      ],
-      do: `finderscope callees '${CPU_FIXTURE}' 'main src/main.js:10:3'`,
-    });
+    assert.equal(data.metric, "time");
+    assert.equal(data.unit, "us");
+    assert.equal(data.total, 5400);
+    assert.equal(data.causedTotal, 4400);
+    assert.equal(data.causedShare, 0.815);
+    assert.deepEqual(data.fixCandidates.map((row: { key: string; value: number }) => [row.key, row.value]), [
+      ["main src/main.js:10:3", 3900],
+      ["compute src/util.js:4:2", 500],
+    ]);
+    assert.deepEqual(data.fixCandidates[0].entries, [
+      { key: "helper lodash/index.js:15:7", name: "helper", area: "lodash", value: 2900 },
+    ]);
+    assert.equal(data.fixCandidates[0].entriesCut, 0);
+    assert.deepEqual(data.notCaused, [
+      { area: "idle", value: 900, share: 0.167 },
+      { area: "program", value: 100, share: 0.019 },
+    ]);
+    assert.equal(data.do, `finderscope lines '${CPU_FIXTURE}' 'main src/main.js:10:3'`);
   });
 
   test("heap profile text (still-live-at-exit wording, full key in hand-offs, peak-measurement do:)", async () => {
@@ -169,35 +103,15 @@ do: finderscope callees '${CPU_FIXTURE}' 'main src/main.js:10:3'
     assert.equal(code, 0);
     assert.equal(
       out.join(""),
-      `profile: ${HEAP_FIXTURE}
+      `profile: ${HEAP_FIXTURE}; total 8.0KB; your code caused 8.0KB (100.0%)
 
-finderscope summary (bytes, total 8.0KB still live when the process exited - not the peak)
-
-your code, top down:
+fix candidates:
      8.0KB  100.0%  allocateBuffers src/alloc.js:6:4
-     2.0KB   25.0%    (self)
-     6.0KB   75.0%    leftpad: helperAlloc leftpad/index.js:3:2
+    self 2.0KB; leftpad helperAlloc 6.0KB
 
-areas:
-  leftpad                 6.0KB  75.0%
-  own                     2.0KB  25.0%
+note: the total is memory still live when the process exited, not the peak
 
-top by self:
-     6.0KB   75.0%  helperAlloc leftpad/index.js:3:2
-     2.0KB   25.0%  allocateBuffers src/alloc.js:6:4
-
-your code by total:
-     8.0KB  100.0%  allocateBuffers src/alloc.js:6:4
-
-where your code hands off:
-  leftpad 75.0% <- allocateBuffers src/alloc.js:6:4 (75.0%)
-
-hottest paths:
-     6.0KB   75.0%  allocateBuffers src/alloc.js:6:4 -> helperAlloc leftpad/index.js:3:2
-     2.0KB   25.0%  allocateBuffers src/alloc.js:6:4
-
-note: for peak memory instead of what was still live at exit, use /usr/bin/time -l <command> (macOS) or --heapsnapshot-near-heap-limit
-do: finderscope callees '${HEAP_FIXTURE}' 'allocateBuffers src/alloc.js:6:4'
+do: finderscope lines '${HEAP_FIXTURE}' 'allocateBuffers src/alloc.js:6:4'
 `,
     );
   });
@@ -209,30 +123,17 @@ do: finderscope callees '${HEAP_FIXTURE}' 'allocateBuffers src/alloc.js:6:4'
     const data = JSON.parse(out.join(""));
     assert.equal(
       data.note,
-      "for peak memory instead of what was still live at exit, use /usr/bin/time -l <command> (macOS) or --heapsnapshot-near-heap-limit",
+      "the total is memory still live when the process exited, not the peak",
     );
-    assert.equal(data.do, `finderscope callees '${HEAP_FIXTURE}' 'allocateBuffers src/alloc.js:6:4'`);
+    assert.equal(data.do, `finderscope lines '${HEAP_FIXTURE}' 'allocateBuffers src/alloc.js:6:4'`);
   });
 
-  // Regression target: "your code, top down" is the one section whose "… N more" hints name a
-  // node other than the profile's own top-level anchor (a nested node's own key, or - for the root
-  // list itself - a different command altogether, `top --by root`). Both must still carry the
-  // REAL profile path, single-quoted, not a bare "<profile>" placeholder - this fixture is wide
-  // enough (4 own roots, 6 leaf children under the heaviest) to force a cut at both the root list
-  // and inside a root's own tree in the same run.
-  test("top-down's own \"… N more\" hints carry the real profile path and a real node key", async () => {
+  test("the default omits the former top-down and path sections", async () => {
     const { io, out } = capture();
     const code = await main([WIDE_FIXTURE, ...ROOT], io);
     assert.equal(code, 0);
     const text = out.join("");
-    assert.ok(
-      text.includes(`… 1 more (finderscope callees '${WIDE_FIXTURE}' 'ownA src/a.js:1:1' -n 6)`),
-      `expected the nested cut hint to name the real profile path and node key, got:\n${text}`,
-    );
-    assert.ok(
-      text.includes(`… 1 more (finderscope top '${WIDE_FIXTURE}' --by root -n 4)`),
-      `expected the root-list cut hint to name the real profile path, got:\n${text}`,
-    );
+    assert.doesNotMatch(text, /your code, top down|your code by total|where your code hands off|hottest paths/);
     assert.doesNotMatch(text, /<profile>|<function>/);
   });
 });
@@ -245,15 +146,12 @@ describe("finderscope top", () => {
       text.out.join(""),
       `profile: ${CPU_FIXTURE}
 
-finderscope top (by self, total 5.4ms)
+finderscope top (by caused, total 5.4ms)
 
-     2.9ms   53.7%  lodash       helper lodash/index.js:15:7
-     1.0ms   18.5%  own          main src/main.js:10:3
-     0.9ms   16.7%  idle         (idle)
+     3.9ms   72.2%  own          main src/main.js:10:3
      0.5ms    9.3%  own          compute src/util.js:4:2
-     0.1ms    1.9%  program      (program)
 
-do: finderscope callers '${CPU_FIXTURE}' 'helper lodash/index.js:15:7'
+do: finderscope lines '${CPU_FIXTURE}' 'main src/main.js:10:3'
 `,
     );
 
@@ -261,22 +159,33 @@ do: finderscope callers '${CPU_FIXTURE}' 'helper lodash/index.js:15:7'
     await main(["top", CPU_FIXTURE, ...ROOT, "--json"], json.io);
     const data = JSON.parse(json.out.join(""));
     assert.equal(data.unit, "us");
-    assert.equal(data.by, "self");
+    assert.equal(data.by, "caused");
     assert.equal(data.cut, 0);
-    assert.equal(data.do, `finderscope callers '${CPU_FIXTURE}' 'helper lodash/index.js:15:7'`);
+    assert.equal(data.do, `finderscope lines '${CPU_FIXTURE}' 'main src/main.js:10:3'`);
     assert.deepEqual(
       data.entries.map((e: { key: string }) => e.key),
-      ["helper lodash/index.js:15:7", "main src/main.js:10:3", "(idle)", "compute src/util.js:4:2", "(program)"],
+      ["main src/main.js:10:3", "compute src/util.js:4:2"],
     );
   });
 
   test("--area filters to one package", async () => {
     const { io, out } = capture();
-    const code = await main(["top", CPU_FIXTURE, ...ROOT, "--area", "lodash", "--json"], io);
+    const code = await main(["top", CPU_FIXTURE, ...ROOT, "--area", "lodash", "--by", "self", "--json"], io);
     assert.equal(code, 0);
     const data = JSON.parse(out.join(""));
     assert.equal(data.entries.length, 1);
     assert.equal(data.entries[0].key, "helper lodash/index.js:15:7");
+  });
+
+  test("--leaf keeps only caused cost that ends at the selected leaf", async () => {
+    const { io, out } = capture();
+    const code = await main(["top", CPU_FIXTURE, ...ROOT, "--leaf", "helper", "--json"], io);
+    assert.equal(code, 0);
+    const data = JSON.parse(out.join(""));
+    assert.equal(data.leaf, "helper lodash/index.js:15:7");
+    assert.deepEqual(data.entries, [
+      { key: "main src/main.js:10:3", area: "own", value: 2900, share: 0.537 },
+    ]);
   });
 
   test("--by root ranks top-down's own roots; --area own --by total can hide a small one behind a deep tied chain", async () => {
@@ -330,10 +239,9 @@ describe("finderscope callers / callees", () => {
 
 finderscope callers "helper lodash/index.js:15:7" (total 2.9ms)
 
-     2.9ms  100.0%  main src/main.js:10:3
-     2.9ms  100.0%    program: (root)
+     2.9ms  100.0%  main src/main.js:10:3 (direct)
 
-do: finderscope callers '${CPU_FIXTURE}' 'main src/main.js:10:3'
+do: finderscope callees '${CPU_FIXTURE}' 'main src/main.js:10:3'
 `,
     );
   });

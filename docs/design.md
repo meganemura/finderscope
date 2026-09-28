@@ -36,16 +36,16 @@ profiled program.
 
 | Command | Answers |
 |---|---|
-| `finderscope <profile> [--from ms --to ms]` | The summary: your code top down, split by area, top functions by self and by total, the hottest call paths, and a `do:` line. |
-| `finderscope top <profile> [--by self\|total\|root] [--area <area>] [--from ms --to ms] [-n N]` | A longer ranked list - `--by root` ranks "your code, top down"'s own roots. |
+| `finderscope <profile> [--from ms --to ms]` | Own functions ranked by caused cost, the cost breakdown, work not caused by own code, and a `do:` line. |
+| `finderscope top <profile> [--by caused\|self\|total\|root] [--leaf <function>] [--area <area>] [--from ms --to ms] [-n N]` | A longer list. Caused cost is the default. `--leaf` keeps cost that ends at one leaf. |
 | `finderscope <snapshot> [-n N]` | The heap summary; `-n` expands its single-retainer list. |
 | `finderscope top <snapshot> [--by retained\|self\|count] [-n N]` | A longer constructor list for a heap snapshot; self is the default. |
 | `finderscope retainers <snapshot> <constructor-or-#id>` | Bounded retaining paths into one constructor group or object. |
-| `finderscope callers <profile> <function> [--from ms --to ms]` | Which call paths lead to the function, with each path's share. |
+| `finderscope callers <profile> <function> [--direct] [--from ms --to ms]` | The nearest own callers of a non-own function. `--direct` shows the direct caller tree. |
 | `finderscope callees <profile> <function> [--from ms --to ms]` | Where the function's own total time goes. |
 | `finderscope lines <profile> <function> [--from ms --to ms]` | The hot lines inside the function's own body, from V8's own per-line sample counts. |
 | `finderscope diff <before> <after>` | The functions and areas whose share changed most, sorted by the size of the change. |
-| `finderscope run [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-min MB] [--exit-on-signal] -- <command...>` | Runs the command with profiling enabled, then prints each report it wrote. |
+| `finderscope run [--child-output capture\|inherit] [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-min MB] [--exit-on-signal] -- <command...>` | Runs the command, captures bounded child output, and writes the report in the scratch directory. |
 | `finderscope timeline <profile>` | 20 equal time buckets across a cpu profile, each with the top own function by self time - lets an agent pick a `--from`/`--to` window before it exists to guess one. |
 | `finderscope --help` / `-h` / `help` | The usage of every command in one screen. `finderscope <command> --help` prints just that command's own usage. |
 
@@ -87,6 +87,9 @@ the one thing that list ranks.
 
 `run` sets `NODE_OPTIONS`, so child Node processes write profiles too. It reports each process, the
 largest first. It runs only the command the caller gave; SIGINT and SIGTERM are forwarded to it.
+By default, child stdout and stderr go to files. The terminal gets ten lines from each tail, with
+each line bounded to 200 characters. `--child-output inherit` restores live output. The complete
+report is `report.txt`, or `report.json` with `--json`.
 The scratch directory holding every profile it wrote is never deleted, on purpose - it is the path
 an agent re-queries with `top`/`callers`/`callees` after reading the summary, and `run` prints it
 before it prints anything else for exactly that reason.
@@ -105,19 +108,24 @@ streaming summary as a snapshot passed directly on the command line.
 
 ## How the report reads
 
-- The summary opens with "your code, top down": each path's root is its first own frame - the
-  root's own value is the sum of every path that reaches "own" code through it as that path's
-  first own frame - merged by key into at most 3 roots, heaviest first. Beneath each root is a
-  tree of its callees, built exactly like `callees` builds one for a single resolved function:
-  merged by key, an own frame expanded, a non-own subtree collapsed into one
-  `<area>: <entry frame>` line, depth 3, at most 5 children per level, sorted by value, with a
-  `(self)` line only where it is nonzero. When more than 3 roots exist, a line says so and names
-  `finderscope top <profile> --by root`, which ranks every root the same way (see "Commands"
-  above) - not `--area own --by total`, which ranks by a function's own total and so can leave a
-  real root hidden behind a deeper own function that happens to hold more total time. This section
-  alone is meant to give a program built from phase functions - an entry point that calls
-  `load` / `analyze` / `report` in turn - its phase split without a follow-up command, provided
-  every phase sits within 3 levels of its own root; a deeper split still needs `callees`.
+The default no longer repeats the earlier total ranking, hand-off list, hottest paths, or top-down
+tree. `top --by total` answers the inclusive-total question. `top --by root` answers the first-own-
+root question. `callees` shows where one own function hands off. `callers --paths` and
+`callees --paths` keep the complete folded path views. `top --by self` keeps the leaf-work ranking.
+
+- Each sample belongs to the deepest own frame on its root-to-leaf stack. This makes caused cost
+  exclusive: caused values plus the no-own value equal the profile total, and no sample appears
+  in two rows. A function's caused cost cannot exceed its inclusive total.
+- A candidate row splits caused cost into self cost and non-own entry frames. An entry is the
+  first non-own frame below the candidate. The report shows the three largest entries. Each entry
+  shows its area, function name, and cost. JSON keeps its full key. `callees` shows deeper leaves.
+- `reached from` shows one heaviest own caller chain, nearest caller first, with at most three hops.
+  It omits the candidate itself. Consecutive copies of another caller become one recursive hop.
+  Real CLI profiles produced one dominant chain for the leading candidates. Multiple direct
+  caller rows repeated the same entry frame and used more lines without changing the next source
+  location. The bounded chain preserved the route and read better in the default report.
+- Work with no own frame groups into module loading, GC, idle, program, and other work. A profile
+  with at least 80% idle folds to one line in `run`, while a direct profile query remains complete.
 - A function is printed as `name path:line:col`, with 1-based line and column. The same text works
   as the `<function>` argument, so an agent can copy it into the next command. A bare name or a
   plain substring of the name also works when it matches one function. A full key resolves both
@@ -204,37 +212,20 @@ streaming summary as a snapshot passed directly on the command line.
   selected function's mapped source body for the callee name as an identifier followed by `(`,
   including `.name(` property calls. The report says `name appears on` because these are
   source-text matches, not measured call sites. An unreadable source or no match prints `call site
-  not found in source`. The final `do:` opens `callees` for the same function. The summary's own
-  `do:` rule gained one more step
-  for the same reason: when the top OWN function by self time holds at least 10% of the profile
-  total AND this profile actually has positionTicks recorded for it, summary's `do:` prefers `lines`
-  for it too, ahead of the older "point at its callers" rule - once an own function is provably
-  worth reading, "which of its lines" is the more concrete next step than "who calls it", and
-  finding that out no longer needs a whole extra command's round trip once positionTicks already
-  answered it. The positionTicks check matters: without it, a profile with no per-line data at all
-  (an older Node build, or - since this rule reads the OWN function regardless of metric - a heap
-  profile, which never has positionTicks at all) would get pointed at a `lines` command whose only
-  real answer is a `note:`, not a next step.
+  not found in source`. The final `do:` opens `callees` for the same function. The summary always
+  opens `lines` for its first fix candidate. `lines` gives a bounded fallback when the profile has
+  no `positionTicks`, so this workflow does not branch on data presence.
 - Output has a budget. Each list has a default length. A line that was cut says how many entries
   were left out, and which command shows them.
-- The last line is always `do:` with the next command, chosen from the data. An example: when one
-  function holds most of the self time, it suggests `callers` for that function. `do:` never
-  targets a special frame - `(root)`, `(program)`, `(idle)`, `(garbage collector)` - since none of
-  them is code a `callers`/`callees` command can drill into; it falls back to `top` when nothing
-  else qualifies. `diff`'s own `do:` never names a row whose delta rounded to 0.000 - the exact
+- The last line is always `do:` with the next command, chosen from the data. The summary opens
+  `lines` for the first fix candidate. It falls back to `top` when there is no candidate. `diff`'s
+  own `do:` never names a row whose delta rounded to 0.000 - the exact
   same row the displayed `functions`/`areas` lists already dropped for that reason (see `diff`'s
   own JSON block below): choosing from the unrounded list would point at a function or area that
   appears nowhere else in the same report.
 - Any prose that is not itself a runnable command - a caveat, a unit mismatch warning - goes on
   its own `note:` line, printed before `do:`, never inside `do:` itself: `do:` is always exactly
   one command an agent can pipe straight into a shell.
-- The summary's "where your code hands off" line names the *last* own frame before a leaf, and the
-  leaf's own area - not the first frame that left "own" code, which double-counts a path that
-  dips back into own code and out again. A chain `own A -> lodash -> native` (A calls into lodash,
-  which calls a JS builtin) shows as `native <- A`: the line is about where the time ends up
-  (`native`), not about which package sat in between. `finderscope callees A` shows the full path
-  through `lodash` to get there.
-
 ## Heap snapshot analysis
 
 The parser reads the header first and allocates typed arrays from `node_count` and `edge_count`.
@@ -323,28 +314,19 @@ summary command with a larger `-n`.
 ```json
 {
   "metric": "time", "unit": "us", "total": 5400,
-  "topDown": [{ "key": "main src/main.js:10:3", "area": "own", "value": 4400, "share": 0.815,
-    "isSelf": false, "childrenCut": 0, "children": [
-      { "key": "(self)", "area": "own", "value": 1000, "share": 0.185, "isSelf": true, "children": [], "childrenCut": 0 },
-      { "key": "helper lodash/index.js:15:7", "area": "lodash", "value": 2900, "share": 0.537, "isSelf": false, "children": [], "childrenCut": 0 },
-      ...
-    ] }],
-  "topDownCut": 0,
-  "areas": [{ "area": "lodash", "value": 2900, "share": 0.537 }, ...],
-  "topSelf": [{ "key": "helper lodash/index.js:15:7", "value": 2900, "share": 0.537 }, ...],
-  "topSelfCut": 0,
-  "yourCodeByTotal": [{ "key": "main src/main.js:10:3", "value": 4400, "share": 0.815 }, ...],
-  "yourCodeByTotalCut": 0,
-  "handoffs": [{ "area": "lodash", "areaShare": 0.537, "frames": [{ "key": "main src/main.js:10:3", "share": 0.537 }] }],
-  "paths": [{ "segments": ["main src/main.js:10:3", "helper lodash/index.js:15:7"], "value": 2900, "share": 0.537 }, ...],
-  "do": "finderscope callees '<profile>' 'main src/main.js:10:3'"
+  "causedTotal": 4400, "causedShare": 0.815,
+  "fixCandidates": [{ "key": "main src/main.js:10:3", "value": 3900, "share": 0.722,
+    "self": 1000, "entries": [{ "key": "helper lodash/index.js:15:7", "name": "helper",
+      "area": "lodash", "value": 2900 }], "entriesCut": 0,
+    "reachedFrom": [] }],
+  "fixCandidatesCut": 0,
+  "notCaused": [{ "area": "idle", "value": 900, "share": 0.167 },
+    { "area": "program", "value": 100, "share": 0.019 }],
+  "do": "finderscope lines '<profile>' 'main src/main.js:10:3'"
 }
 ```
-(`note` is a heap-only field - JSON.stringify drops a `note`/`area` field entirely rather than
-writing it as `null` when there is none, matching every other command below with an optional field.
-A `CallTreeNode` - here and in every tree below - also carries `recursive: true` when that node
-calls itself directly. A depth-limited node carries `depthCut: true`, `depthCutValue: 1200`, and
-`depthCutFrames: 2`; these fields are omitted when the limit does not apply. `window: { "from": 0,
+(`note` is a heap-only field. JSON.stringify drops an optional field instead of writing `null`.
+`window: { "from": 0,
 "to": 5400 }` appears only when `--from`/`--to` was given - `total`
 above is then already the window's own total, and every `do:`/cut-hint command embeds the same
 `--from`/`--to` so a follow-up command never silently drops the window.)
@@ -352,27 +334,23 @@ above is then already the window's own total, and every `do:`/cut-hint command e
 `finderscope top <profile> --json`:
 ```json
 {
-  "metric": "time", "unit": "us", "by": "self", "total": 5400,
-  "entries": [{ "key": "helper lodash/index.js:15:7", "area": "lodash", "value": 2900, "share": 0.537 }, ...],
+  "metric": "time", "unit": "us", "by": "caused", "total": 5400,
+  "entries": [{ "key": "main src/main.js:10:3", "area": "own", "value": 3900, "share": 0.722 }, ...],
   "cut": 0,
-  "do": "finderscope callers '<profile>' 'helper lodash/index.js:15:7'"
+  "do": "finderscope lines '<profile>' 'main src/main.js:10:3'"
 }
 ```
-(`area` appears, as the string passed to `--area`, only when `--area` was given. `--by root` ranks
-"your code, top down"'s own roots instead of a function's self or total - same entry shape, `area`
-always `"own"` since a root is always an own frame by construction; this is the command the summary's
-own `topDownCut` hint names, so a root "your code, top down" had to cut still shows up somewhere.)
+(`area` appears, as the string passed to `--area`, only when `--area` was given. `leaf` appears
+when `--leaf` was given. `--by root` keeps the earlier first-own-root ranking available.)
 
-`finderscope callers <profile> <fn> --json` (the tree; `--paths` below is the flat alternative):
+`finderscope callers <profile> <non-own-fn> --json`:
 ```json
 {
   "metric": "time", "unit": "us", "function": "helper lodash/index.js:15:7", "total": 2900,
-  "children": [{ "key": "main src/main.js:10:3", "area": "own", "value": 2900, "share": 1,
-    "isSelf": false, "childrenCut": 0, "children": [
-      { "key": "(root)", "area": "program", "value": 2900, "share": 1, "isSelf": false, "children": [], "childrenCut": 0 }
-    ] }],
-  "childrenCut": 0,
-  "do": "finderscope callers '<profile>' 'main src/main.js:10:3'"
+  "callers": [{ "key": "main src/main.js:10:3", "value": 2900, "share": 1,
+    "framesBetween": 0 }],
+  "cut": 0,
+  "do": "finderscope callees '<profile>' 'main src/main.js:10:3'"
 }
 ```
 
@@ -399,9 +377,7 @@ own `topDownCut` hint names, so a root "your code, top down" had to cut still sh
   "do": "finderscope callees '<profile>' 'compute src/util.js:4:2'"
 }
 ```
-(`callers`' own JSON carries the identical `recursive`/`children`/`childrenCut` shape - top-level
-`recursive: true` there means `<fn>` calls itself somewhere in its own ancestry, folded into the
-node that recurses rather than shown as a nested repeat of the same name.)
+(`callers --direct` carries the same tree shape.)
 
 `finderscope callees <profile> <fn> --paths --json` (same shape as `callers --paths`):
 ```json
@@ -464,6 +440,9 @@ each profile's own total changed):
 ```json
 {
   "scratchDir": "/tmp/finderscope-xxxxxx",
+  "child": { "exitCode": 0,
+    "stdout": { "path": "/tmp/finderscope-xxxxxx/child.stdout.log", "tail": [] },
+    "stderr": { "path": "/tmp/finderscope-xxxxxx/child.stderr.log", "tail": [] } },
   "profiles": [ /* one full summary object per profile written, largest total first */ ],
   "errors": [{ "profile": "<path>", "error": "<message>", "do": "<command>" }],
   "heapSnapshots": [ "/tmp/finderscope-xxxxxx/Heap.....heapsnapshot" ],
@@ -474,6 +453,7 @@ each profile's own total changed):
   "heapSnapshotGarbageNote": "the snapshot holds about 4.2MB of live objects, but heapUsed was 265.3MB at capture ...",
   "heapSnapshotErrorNote": "heap snapshot sampling stopped after an error: <message>",
   "heapSnapshotExitNote": "the exit-time heap snapshot was skipped near the heap limit",
+  "report": "/tmp/finderscope-xxxxxx/report.json",
   "do": "<the first profile's own do:, or a fallback>"
 }
 ```
@@ -528,6 +508,7 @@ These are properties, tested with generated profiles:
 - The self times of all functions sum to the profile's total.
 - A function's total time is at least its self time and at most the profile's total.
 - The area totals sum to the profile's total.
+- Each candidate's entry values sum to its caused cost minus its self cost.
 - `diff` of a profile with itself reports no change.
 - Mapping a position through a source map that the test generated returns the original position.
 - `lines`' per-line times for one function sum to exactly the self time of the nodes that carried

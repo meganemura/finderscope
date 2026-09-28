@@ -19,14 +19,14 @@ npm install --save-dev finderscope
 
 ```
 finderscope <profile> [--root dir] [--from ms --to ms] [--json]
-finderscope top <profile> [--by self|total|root] [--area <area>] [--from ms --to ms] [-n N] [--json]
+finderscope top <profile> [--by caused|self|total|root] [--leaf <function>] [--area <area>] [--from ms --to ms] [-n N] [--json]
 finderscope top <snapshot> [--by retained|self|count] [-n N] [--json]
 finderscope retainers <snapshot> <constructor-or-#id> [-n N] [--json]
-finderscope callers <profile> <function> [--expand] [--paths] [--from ms --to ms] [-n N] [--json]
+finderscope callers <profile> <function> [--direct] [--expand] [--paths] [--from ms --to ms] [-n N] [--json]
 finderscope callees <profile> <function> [--expand] [--paths] [--from ms --to ms] [-n N] [--json]
 finderscope lines <profile> <function> [--from ms --to ms] [-n N] [--json]
 finderscope diff <before> <after> [-n N] [--json]
-finderscope run [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-threshold <percent>] [--heap-snapshot-min <MB>] [--exit-on-signal] [--root dir] [--json] -- <command...>
+finderscope run [--child-output capture|inherit] [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-threshold <percent>] [--heap-snapshot-min <MB>] [--exit-on-signal] [--root dir] [--json] -- <command...>
 finderscope timeline <profile> [--json]
 finderscope --help | -h | help
 ```
@@ -49,10 +49,17 @@ file がもう存在しない場合は、一方の path がもう一方の path 
 では `"bytes"` であり、すべての value と total はこの単位を使う。share は 0 から 1 の値で、
 小数第 3 位までに丸める（`0.973`）。完全な JSON shape は [docs/design.md](docs/design.md) にある。
 
-`callers` と `callees` は、function key ごとにまとめた直接の caller または callee を tree で
+summary は、各 sample を stack 上で最も深い `own` frame に 1 回だけ割り当て、原因となった
+cost の順に function を表示する。各行は self time と、その function が直接呼び出した
+own ではない entry の上位 3 件を示す。各 entry は area、function 名、cost を持つ。
+より深い leaf は `callees` で確認する。`top` も同じ順位を既定値にする。`top --leaf <function>` は、指定した
+leaf の self time を発生させた own function を示す。以前の順位は `top --by self|total|root` で使える。
+
+`callers --direct` と `callees` は、function key ごとにまとめた直接の caller または callee を tree で
 表示する。既定の深さは 2 である。sample path ごとの行は表示しない。hot function の時間は、
 1 個の package 内の深さだけが異なる多数の path に分散することが多いためである。平らな一覧は
-エージェントの判断に役立たない。`own` ではない subtree は、area、最初の frame、total time を
+エージェントの判断に役立たない。own ではない function に対する通常の `callers` は、最も近い
+own frame ごとに path をまとめ、間にある frame 数を表示する。`own` ではない subtree は、area、最初の frame、total time を
 1 行にまとめる。`--expand` は package 内部も展開する。function 自身の self time は `(self)`
 行になる。以前の path ごとの一覧は `--paths` で表示できる。
 深さの上限で止まった node は、表示しなかった value と frame 数を示し、その node を展開する command を表示する。
@@ -67,41 +74,31 @@ file がもう存在しない場合は、一方の path がもう一方の path 
 $ finderscope run -- node test/fixtures/busy-script.js
 
 scratch dir: /tmp/finderscope-xxxxxx (kept on purpose - re-query it with finderscope callers/callees/top/retainers)
+child exit: 0
+child stdout: /tmp/finderscope-xxxxxx/child.stdout.log
+child stderr: /tmp/finderscope-xxxxxx/child.stderr.log
 
-profile: /tmp/finderscope-xxxxxx/CPU.20260101.000000.12345.0.001.cpuprofile
+command: 'node' 'test/fixtures/busy-script.js'; total 201.0ms; your code caused 199.4ms (99.2%)
 
-finderscope summary (time, total 201.0ms)
-
-your code, top down:
-   199.4ms   99.2%  (anonymous) test/fixtures/busy-script.js:1:1
-     0.3ms    0.2%    (self)
-   199.1ms   99.1%    busy test/fixtures/busy-script.js:3:14
-   199.1ms   99.1%      (self)
-
-areas:
-  own                   199.4ms  99.2%
-  idle                    1.6ms  0.8%
-
-top by self:
+fix candidates:
    199.1ms   99.1%  busy test/fixtures/busy-script.js:3:14
-     1.6ms    0.8%  (idle)
+    self 199.1ms
+    reached from: (anonymous) test/fixtures/busy-script.js:1:1
      0.3ms    0.2%  (anonymous) test/fixtures/busy-script.js:1:1
+    self 0.3ms
 
-your code by total:
-   199.4ms   99.2%  (anonymous) test/fixtures/busy-script.js:1:1
-   199.1ms   99.1%  busy test/fixtures/busy-script.js:3:14
+not caused by your code:
+  idle                  1.6ms  0.8%
 
-hottest paths:
-   199.1ms   99.1%  (anonymous) test/fixtures/busy-script.js:1:1 -> busy test/fixtures/busy-script.js:3:14
-     1.6ms    0.8%  (idle)
-     0.3ms    0.2%  (anonymous) test/fixtures/busy-script.js:1:1
-
-do: finderscope callers '/tmp/finderscope-xxxxxx/CPU.20260101.000000.12345.0.001.cpuprofile' 'busy test/fixtures/busy-script.js:3:14'
+report: /tmp/finderscope-xxxxxx/report.txt
+do: finderscope lines '/tmp/finderscope-xxxxxx/CPU.20260101.000000.12345.0.001.cpuprofile' 'busy test/fixtures/busy-script.js:3:14'
 ```
 
 `do:` または `… more` command の各引数は、POSIX 形式の single quote で囲まれる。対象は
 profile path と function key である。space、`$`、backtick が含まれても、`sh -c` は値を
-変えない。`run` は scratch directory を削除しない。summary を読んだあと、その path を使って
+変えない。`run` は既定で child の stdout と stderr を scratch directory 内に保存し、それぞれ
+末尾 10 行だけを表示する。`--child-output inherit` で live output に戻せる。report は
+`report.txt` にも保存し、`--json` では `report.json` に保存する。`run` は scratch directory を削除しない。summary を読んだあと、その path を使って
 再度 query できる。SIGINT と SIGTERM は profile 対象の command に転送する。
 
 `--heap` の total は、profile 対象の process が終了した時点で残っていた memory である。
@@ -137,6 +134,9 @@ signal listener には終了処理のための 2 秒を与える。2 秒後も p
 listener は処理が制御を返すまで動かないため、この flag は終了を遅らせることがある。SIGKILL は
 その process を終了でき、捕捉できない。すべての CPU profile が idle 中心なら、考えられる原因と、
 `--exit-on-signal` を追加した shell-safe な再実行 command を表示する。
+
+`--root` を省略した場合は、current directory を含む Git top level を使う。Git repository の外では、
+最も近い `package.json` の directory を使い、それもなければ current directory を使う。
 
 `own` は、エージェントが編集できる実際の source を表す。`--root` の中にあるという意味では
 ない。`node_modules` の外にある `file://` URL または absolute path は、場所にかかわらず

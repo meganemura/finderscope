@@ -5,7 +5,7 @@
 // reports and the callers/callees/top/retainers commands that re-query the kept artifacts.
 
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { constants as osConstants, tmpdir } from "node:os";
 import { join } from "node:path";
 import { shQuote } from "./report/summary.js";
@@ -25,6 +25,7 @@ export interface RunOptions {
   /** Converts otherwise unhandled catchable signals to conventional numeric exits so V8 flushes
    *  profiles. Opt-in because a synchronous loop cannot run a JavaScript signal listener. */
   exitOnSignal?: boolean;
+  childOutput?: "capture" | "inherit";
   command: string[];
 }
 
@@ -44,6 +45,10 @@ export interface RunResult {
   heapPeakNote: string | undefined;
   heapSnapshotCaptures: { path: string; heapUsed: number; cpuTimeUs: number; liveAfter?: number; threadId: number }[];
   heapSnapshotStats: { snapshotsWritten: number; peakHeapUsed: number; maxGrowth: number; cpuTimeUs: number; maxSamplerGapMs: number; errors: string[]; exitSkipped: string[] } | undefined;
+  childStdoutPath: string;
+  childStderrPath: string;
+  childStdoutTail: string[];
+  childStderrTail: string[];
 }
 
 /** A caller mistake about the command itself - no command given, or the command does not exist -
@@ -101,6 +106,10 @@ export function runCommand(options: RunOptions): Promise<RunResult> {
     }
 
     const scratchDir = mkdtempSync(join(tmpdir(), "finderscope-"));
+    const childStdoutPath = join(scratchDir, "child.stdout.log");
+    const childStderrPath = join(scratchDir, "child.stderr.log");
+    writeFileSync(childStdoutPath, "");
+    writeFileSync(childStderrPath, "");
     const existingNodeOptions = process.env["NODE_OPTIONS"] ?? "";
     const flags = [`--cpu-prof`, `--cpu-prof-dir=${quoteForNodeOptions(scratchDir)}`];
     if (options.exitOnSignal) {
@@ -248,9 +257,13 @@ process.on("exit", () => {
 
     const [command, ...args] = options.command;
     const child = spawn(command!, args, {
-      stdio: "inherit",
+      stdio: options.childOutput === "inherit" ? "inherit" : ["inherit", "pipe", "pipe"],
       env: { ...process.env, NODE_OPTIONS: nodeOptions },
     });
+    if (options.childOutput !== "inherit") {
+      child.stdout?.on("data", (chunk: Buffer) => appendFileSync(childStdoutPath, chunk));
+      child.stderr?.on("data", (chunk: Buffer) => appendFileSync(childStderrPath, chunk));
+    }
 
     // Forwarded, not left to Node's own default (which would kill finderscope itself and leave
     // the child running): an agent that Ctrl-C's a long `finderscope run` almost always means
@@ -273,6 +286,8 @@ process.on("exit", () => {
       }
       reject(err);
     });
+    // A grandchild can inherit these pipes after the named command exits. Waiting for `close`
+    // would then keep finderscope alive for work it did not start or promise to supervise.
     child.on("exit", (code, signal) => {
       stopForwarding();
       const exitCode = exitCodeFor(code, signal);
@@ -332,7 +347,25 @@ process.on("exit", () => {
         errors: snapshotMetadata.flatMap((metadata) => metadata.failure === undefined ? [] : [metadata.failure]),
         exitSkipped: snapshotMetadata.flatMap((metadata) => metadata.exitSkipped === undefined ? [] : [metadata.exitSkipped]),
       } : undefined;
-      resolvePromise({ exitCode, signal, scratchDir, profiles, heapSnapshots, heapPeakNote, heapSnapshotCaptures, heapSnapshotStats });
+      const tail = (path: string): string[] => readFileSync(path, "utf8")
+        .split(/\r?\n/)
+        .filter((line) => line.length > 0)
+        .slice(-10)
+        .map((line) => line.length > 200 ? `${line.slice(0, 199)}…` : line);
+      resolvePromise({
+        exitCode,
+        signal,
+        scratchDir,
+        profiles,
+        heapSnapshots,
+        heapPeakNote,
+        heapSnapshotCaptures,
+        heapSnapshotStats,
+        childStdoutPath,
+        childStderrPath,
+        childStdoutTail: tail(childStdoutPath),
+        childStderrTail: tail(childStderrPath),
+      });
     });
   });
 }

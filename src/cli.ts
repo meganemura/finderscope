@@ -9,7 +9,8 @@
 // guard exists so an old note that says `node dist/cli.js ...` still works instead of silently
 // exiting 0 having done nothing).
 
-import { readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { dirname, parse as parsePath } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { analyzeCpuProfile, analyzeHeapProfile, buildTimeline, type ProfileAnalysis, type TimeWindow } from "./model.js";
 import { analyzeHeapSnapshot, type HeapSnapshotAnalysis } from "./heapsnapshot.js";
@@ -18,9 +19,9 @@ import { parseCpuProfile } from "./profile/cpu.js";
 import { parseHeapProfile } from "./profile/heap.js";
 import { parseHeapSnapshot } from "./profile/heapsnapshot.js";
 import { resolveFunction } from "./query.js";
-import { buildSummary, formatSummaryText, formatValue } from "./report/summary.js";
+import { buildSummary, formatPercent, formatSummaryText, formatValue } from "./report/summary.js";
 import { buildTop, formatTopText, type TopOptions } from "./report/top.js";
-import { buildCallersPaths, buildCallersTree, formatCallersPathsText, formatCallersTreeText } from "./report/callers.js";
+import { buildCallersPaths, buildCallersTree, buildOwnCallers, formatCallersPathsText, formatCallersTreeText, formatOwnCallersText } from "./report/callers.js";
 import { buildCalleesPaths, buildCalleesTree, formatCalleesPathsText, formatCalleesTreeText } from "./report/callees.js";
 import { buildDiff, formatDiffText } from "./report/diff.js";
 import { buildLines, formatLinesText } from "./report/lines.js";
@@ -373,14 +374,14 @@ function wantsHelp(rest: string[]): boolean {
 const HELP_DO = "finderscope run -- node your-script.js";
 
 const COMMAND_HELP: Record<string, string> = {
-  summary: "finderscope '<profile>' [--root dir] [--from ms --to ms] [--json]\nfinderscope '<snapshot>' [-n N] [--json]\n  The summary: your code top down, areas, top functions, hottest paths, and do:.",
-  top: "finderscope top '<profile>' [--by self|total|root] [--area area] [--from ms --to ms] [-n N] [--json]\nfinderscope top '<snapshot>' [--by retained|self|count] [-n N] [--json]\n  A longer ranked list.",
+  summary: "finderscope '<profile>' [--root dir] [--from ms --to ms] [--json]\nfinderscope '<snapshot>' [-n N] [--json]\n  Own functions ranked by caused cost, work without an own frame, and do:.",
+  top: "finderscope top '<profile>' [--by caused|self|total|root] [--leaf function] [--area area] [--from ms --to ms] [-n N] [--json]\nfinderscope top '<snapshot>' [--by retained|self|count] [-n N] [--json]\n  Own functions ranked by caused cost by default.",
   retainers: "finderscope retainers '<snapshot>' '<constructor-or-#id>' [-n N] [--json]\n  The retaining paths into one constructor group or object.",
-  callers: "finderscope callers '<profile>' '<function>' [--expand] [--paths] [--from ms --to ms] [-n N] [--json]\n  Which call paths lead to the function.",
+  callers: "finderscope callers '<profile>' '<function>' [--direct|--paths] [--expand] [--from ms --to ms] [-n N] [--json]\n  Non-own targets group paths by the nearest own caller. --direct shows the prior caller tree.",
   callees: "finderscope callees '<profile>' '<function>' [--expand] [--paths] [--from ms --to ms] [-n N] [--json]\n  Where the function's own total time goes.",
   lines: "finderscope lines '<profile>' '<function>' [--from ms --to ms] [-n N] [--json]\n  The hot lines inside the function's own body.",
   diff: "finderscope diff '<before>' '<after>' [-n N] [--json]\n  The functions and areas whose share changed most.",
-  run: "finderscope run [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-threshold percent] [--heap-snapshot-min MB] [--exit-on-signal] [--root dir] [--json] -- '<command...>'\n  Runs the command, then prints the summary for each profile it wrote.",
+  run: "finderscope run [--child-output capture|inherit] [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-threshold percent] [--heap-snapshot-min MB] [--exit-on-signal] [--root dir] [--json] -- '<command...>'\n  Captures child output, then prints bounded tails and the report.",
   timeline: "finderscope timeline '<profile>' [--json]\n  20 equal time buckets, each with the top own function by self time - pick a --from/--to window from this.",
 };
 
@@ -389,6 +390,20 @@ const COMMAND_HELP: Record<string, string> = {
 const FROM_TO_UNIT_NOTE = "--from/--to are milliseconds, offset from the profile's own start. summary, top, callers, callees and lines accept them.";
 // Only these commands take a window; diff, run and timeline reject --from/--to.
 const WINDOW_COMMANDS = new Set(["summary", "top", "callers", "callees", "lines"]);
+
+function defaultRoot(cwd: string): string {
+  const ancestors: string[] = [];
+  let current = cwd;
+  for (;;) {
+    ancestors.push(current);
+    const parent = dirname(current);
+    if (parent === current || current === parsePath(current).root) break;
+    current = parent;
+  }
+  const git = ancestors.find((dir) => existsSync(`${dir}/.git`));
+  if (git !== undefined) return git;
+  return ancestors.find((dir) => existsSync(`${dir}/package.json`)) ?? cwd;
+}
 
 function globalHelpText(): string {
   const lines = ["finderscope: turn a V8 profile into a short, ranked report and name the next command", ""];
@@ -425,7 +440,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
 
   const { positionals, options } = parseArgs(rest);
   const json = options.get("json") === true;
-  const root = optionString(options, "root") ?? process.cwd();
+  const root = optionString(options, "root") ?? defaultRoot(process.cwd());
 
   switch (subcommand) {
     case "summary": {
@@ -456,15 +471,15 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
     case "top": {
       const profilePath = positionals[0];
       if (profilePath === undefined) throw new CliError("no profile given", `finderscope top '<profile>'`);
-      checkKnownOptions(options, new Set(["json", "root", "by", "area", "n", "from", "to"]), `finderscope top ${shQuote(profilePath)}`);
+      checkKnownOptions(options, new Set(["json", "root", "by", "leaf", "area", "n", "from", "to"]), `finderscope top ${shQuote(profilePath)}`);
       const n = parsePositiveInt(optionString(options, "n"), `finderscope top ${shQuote(profilePath)} -n '<positive integer>'`);
       const by = optionString(options, "by");
       if (snapshotFile(profilePath)) {
         if (options.has("root")) {
           throw new CliError(`${profilePath} is a heap snapshot - --root does not apply`, `finderscope top ${shQuote(profilePath)} --by self`);
         }
-        if (options.has("area") || options.has("from") || options.has("to")) {
-          throw new CliError(`${profilePath} is a heap snapshot - --area and --from/--to do not apply`, `finderscope top ${shQuote(profilePath)} --by retained`);
+        if (options.has("leaf") || options.has("area") || options.has("from") || options.has("to")) {
+          throw new CliError(`${profilePath} is a heap snapshot - --leaf, --area and --from/--to do not apply`, `finderscope top ${shQuote(profilePath)} --by retained`);
         }
         if (by !== undefined && by !== "retained" && by !== "self" && by !== "count") {
           throw new CliError(`invalid --by ${by}; use retained, self or count for a heap snapshot`, `finderscope top ${shQuote(profilePath)} --by retained`);
@@ -475,14 +490,27 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
           return 0;
         });
       }
-      if (by !== undefined && by !== "self" && by !== "total" && by !== "root") {
-        throw new CliError(`invalid --by ${by}; use self, total or root`,`finderscope top ${shQuote(profilePath)} --by self`);
+      if (by !== undefined && by !== "caused" && by !== "self" && by !== "total" && by !== "root") {
+        throw new CliError(`invalid --by ${by}; use caused, self, total or root`,`finderscope top ${shQuote(profilePath)}`);
+      }
+      if (options.has("leaf") && by !== undefined && by !== "caused") {
+        throw new CliError("--leaf filters caused cost and requires --by caused", `finderscope top ${shQuote(profilePath)} --by caused --leaf '<function>'`);
       }
       const { window, windowArgs } = parseWindow(options, `finderscope top ${shQuote(profilePath)} --from ms --to ms`);
       return attributeUnexpectedErrorsTo([profilePath], () => {
         const analysis = loadAnalysis(profilePath, root, window);
         const topOptions: TopOptions = { area: optionString(options, "area"), n };
         if (by !== undefined) topOptions.by = by;
+        const leafQuery = optionString(options, "leaf");
+        if (leafQuery !== undefined) {
+          topOptions.leaf = resolveFunction(
+            analysis,
+            leafQuery,
+            `finderscope top ${shQuote(profilePath)}`,
+            root,
+            (key) => `finderscope top ${shQuote(profilePath)} --leaf ${shQuote(key)}${windowArgs}`,
+          ).key;
+        }
         const data = buildTop(analysis, profilePath, topOptions, windowArgs);
         io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatTopText(data, profilePath, windowArgs)}\n`);
         return 0;
@@ -510,7 +538,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
       if (profilePath === undefined || query === undefined) {
         throw new CliError("need a profile and a function", `finderscope ${subcommand} '<profile>' '<function>'`);
       }
-      checkKnownOptions(options, new Set(["json", "root", "expand", "paths", "n", "from", "to"]), `finderscope ${subcommand} ${shQuote(profilePath)} ${shQuote(query)}`);
+      checkKnownOptions(options, new Set(["json", "root", "expand", "paths", "direct", "n", "from", "to"]), `finderscope ${subcommand} ${shQuote(profilePath)} ${shQuote(query)}`);
       if (snapshotFile(profilePath)) {
         throw new CliError(`${subcommand} does not apply to a heap snapshot; use retainers`, `finderscope retainers ${shQuote(profilePath)} ${shQuote(query)}`);
       }
@@ -519,6 +547,7 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
         `finderscope ${subcommand} ${shQuote(profilePath)} '<function>' -n '<positive integer>'`,
       );
       const paths = options.get("paths") === true;
+      const direct = options.get("direct") === true;
       const expand = options.get("expand") === true;
       const { window, windowArgs } = parseWindow(options, `finderscope ${subcommand} ${shQuote(profilePath)} ${shQuote(query)} --from ms --to ms`);
       return attributeUnexpectedErrorsTo([profilePath], () => {
@@ -534,6 +563,9 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
           if (paths) {
             const data = buildCallersPaths(analysis, fn, profilePath, n, windowArgs);
             io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatCallersPathsText(data, profilePath, windowArgs)}\n`);
+          } else if (fn.area !== "own" && !direct) {
+            const data = buildOwnCallers(analysis, fn, profilePath, n, windowArgs);
+            io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatOwnCallersText(data, profilePath, windowArgs)}\n`);
           } else {
             const data = buildCallersTree(analysis, fn, profilePath, { expand, n }, windowArgs);
             io.stdout(json ? `${JSON.stringify(data)}\n` : `${formatCallersTreeText(data, profilePath, windowArgs)}\n`);
@@ -617,11 +649,16 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
     }
 
     case "run": {
-      checkKnownOptions(options, new Set(["json", "root", "heap", "heap-peak", "heap-snapshot", "heap-snapshot-threshold", "heap-snapshot-min", "exit-on-signal"]), "finderscope run [--heap] [--heap-peak] [--heap-snapshot] [--exit-on-signal] -- '<command...>'");
+      checkKnownOptions(options, new Set(["json", "root", "child-output", "heap", "heap-peak", "heap-snapshot", "heap-snapshot-threshold", "heap-snapshot-min", "exit-on-signal"]), "finderscope run [--child-output capture|inherit] [--heap] [--heap-peak] [--heap-snapshot] [--exit-on-signal] -- '<command...>'");
       const heap = options.get("heap") === true;
       const heapPeak = options.get("heap-peak") === true;
       const heapSnapshot = options.get("heap-snapshot") === true;
       const exitOnSignal = options.get("exit-on-signal") === true;
+      const childOutputValue = optionString(options, "child-output") ?? "capture";
+      if (childOutputValue !== "capture" && childOutputValue !== "inherit") {
+        throw new CliError(`invalid --child-output ${childOutputValue}; use capture or inherit`, "finderscope run --child-output inherit -- '<command...>'");
+      }
+      const childOutput = childOutputValue as "capture" | "inherit";
       const heapSnapshotThreshold = parsePositiveNumber(
         optionString(options, "heap-snapshot-threshold"),
         "finderscope run --heap-snapshot --heap-snapshot-threshold '<percent>' -- '<command...>'",
@@ -645,13 +682,14 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
         if (heapSnapshotThreshold !== undefined) args.push(`--heap-snapshot-threshold ${heapSnapshotThreshold}`);
         if (snapshotMinimum !== undefined) args.push(`--heap-snapshot-min ${snapshotMinimum}`);
         if (withExitOnSignal || exitOnSignal) args.push("--exit-on-signal");
+        if (childOutput === "inherit") args.push("--child-output inherit");
         const requestedRoot = optionString(options, "root");
         if (requestedRoot !== undefined) args.push(`--root ${shQuote(requestedRoot)}`);
         if (json) args.push("--json");
         args.push("--", ...positionals.map(shQuote));
         return args.join(" ");
       };
-      const result = await runCommand({ heap, heapPeak, heapSnapshot, heapSnapshotThreshold, heapSnapshotMinMb, exitOnSignal, command: positionals });
+      const result = await runCommand({ heap, heapPeak, heapSnapshot, heapSnapshotThreshold, heapSnapshotMinMb, exitOnSignal, childOutput, command: positionals });
 
       // Never deleted, on purpose - stated here, not just in the README/design.md, since this is
       // the one moment an agent actually needs to know it can come back to this exact path.
@@ -706,12 +744,15 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
               }
             : noProfileWarning(result.signal);
         if (json) {
-          io.stdout(
-            `${JSON.stringify({ scratchDir: result.scratchDir, profiles: [], errors: [], heapSnapshots: result.heapSnapshots, heapSnapshotCaptures: result.heapSnapshotCaptures, heapSnapshotStats: result.heapSnapshotStats, heapSnapshotNote: captureNote, heapSnapshotGapNote, heapSnapshotGarbageNote, heapSnapshotErrorNote, heapSnapshotExitNote, heapPeakNote: result.heapPeakNote, warning: warning.message, do: snapshotRetryDo ?? warning.do })}\n`,
-          );
+          const reportPath = `${result.scratchDir}/report.json`;
+          const payload = { scratchDir: result.scratchDir, child: { exitCode: result.exitCode, stdout: { path: result.childStdoutPath, tail: result.childStdoutTail }, stderr: { path: result.childStderrPath, tail: result.childStderrTail } }, profiles: [], errors: [], heapSnapshots: result.heapSnapshots, heapSnapshotCaptures: result.heapSnapshotCaptures, heapSnapshotStats: result.heapSnapshotStats, heapSnapshotNote: captureNote, heapSnapshotGapNote, heapSnapshotGarbageNote, heapSnapshotErrorNote, heapSnapshotExitNote, heapPeakNote: result.heapPeakNote, warning: warning.message, report: reportPath, do: snapshotRetryDo ?? warning.do };
+          writeFileSync(reportPath, `${JSON.stringify(payload, null, 2)}\n`);
+          io.stdout(`${JSON.stringify(payload)}\n`);
         } else {
           const extra = [heapSnapshotNote, captureNote, heapSnapshotGapNote, heapSnapshotGarbageNote, heapSnapshotErrorNote, heapSnapshotExitNote, result.heapPeakNote].filter((s): s is string => s !== undefined).map((s) => `note: ${s}\n`).join("");
-          io.stdout(`${scratchNote}\n${extra}warning: ${warning.message}\ndo: ${snapshotRetryDo ?? warning.do}\n`);
+          const reportPath = `${result.scratchDir}/report.txt`;
+          writeFileSync(reportPath, `warning: ${warning.message}\ndo: ${snapshotRetryDo ?? warning.do}\n`);
+          io.stdout(`${scratchNote}\nchild exit: ${result.exitCode}\nchild stdout: ${result.childStdoutPath}\n${result.childStdoutTail.map((line) => `  ${line}\n`).join("")}child stderr: ${result.childStderrPath}\n${result.childStderrTail.map((line) => `  ${line}\n`).join("")}${extra}warning: ${warning.message}\nreport: ${reportPath}\ndo: ${snapshotRetryDo ?? warning.do}\n`);
         }
         return result.exitCode;
       }
@@ -736,10 +777,22 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
             return buildSummary(analysis, profilePath);
           });
           summaries.push(data);
-          textBlocks.push(snapshotFile(profilePath)
-            ? formatHeapSnapshotSummaryText(data as ReturnType<typeof buildHeapSnapshotSummary>, profilePath)
-            : formatSummaryText(data as ReturnType<typeof buildSummary>, profilePath));
-          firstDo ??= data.do;
+          if (snapshotFile(profilePath)) {
+            textBlocks.push(formatHeapSnapshotSummaryText(data as ReturnType<typeof buildHeapSnapshotSummary>, profilePath));
+            firstDo ??= data.do;
+          } else {
+            const summary = data as ReturnType<typeof buildSummary>;
+            const idleValue = summary.notCaused.find((row) => row.area === "idle")?.value ?? 0;
+            const idleShare = summary.total > 0 ? idleValue / summary.total : 0;
+            if (summary.metric === "time" && idleShare >= 0.8) {
+              const open = `finderscope ${shQuote(profilePath)}`;
+              textBlocks.push(`${profilePath}: idle ${formatPercent(idleShare)}, total ${formatValue(summary.metric, summary.total)}\n\ndo: ${open}`);
+              firstDo ??= open;
+            } else {
+              textBlocks.push(formatSummaryText(summary, profilePath, "", `command: ${positionals.map(shQuote).join(" ")}`));
+              firstDo ??= data.do;
+            }
+          }
         } catch (e) {
           // One bad profile must not hide the others `run` already wrote - report it inline and
           // keep going, rather than aborting the whole summarization loop.
@@ -758,14 +811,30 @@ async function dispatch(argv: string[], io: Io): Promise<number> {
         ? undefined
         : buildRunRerun(heapSnapshotMinMb, true);
       const overallDo = snapshotRetryDo ?? idleDo ?? firstDo ?? "finderscope run -- '<command...>'";
+      const childData = {
+        exitCode: result.exitCode,
+        stdout: { path: result.childStdoutPath, tail: result.childStdoutTail },
+        stderr: { path: result.childStderrPath, tail: result.childStderrTail },
+      };
       if (json) {
-        io.stdout(
-          `${JSON.stringify({ scratchDir: result.scratchDir, profiles: summaries, errors, heapSnapshots: result.heapSnapshots, heapSnapshotCaptures: result.heapSnapshotCaptures, heapSnapshotStats: result.heapSnapshotStats, heapSnapshotNote: captureNote, heapSnapshotGapNote, heapSnapshotGarbageNote, heapSnapshotErrorNote, heapSnapshotExitNote, heapPeakNote: result.heapPeakNote, idleNote, do: overallDo })}\n`,
-        );
+        const reportPath = `${result.scratchDir}/report.json`;
+        const payload = { scratchDir: result.scratchDir, child: childData, profiles: summaries, errors, heapSnapshots: result.heapSnapshots, heapSnapshotCaptures: result.heapSnapshotCaptures, heapSnapshotStats: result.heapSnapshotStats, heapSnapshotNote: captureNote, heapSnapshotGapNote, heapSnapshotGarbageNote, heapSnapshotErrorNote, heapSnapshotExitNote, heapPeakNote: result.heapPeakNote, idleNote, report: reportPath, do: overallDo };
+        writeFileSync(reportPath, `${JSON.stringify(payload, null, 2)}\n`);
+        io.stdout(`${JSON.stringify(payload)}\n`);
       } else {
         const extra = [heapSnapshotNote, captureNote, heapSnapshotGapNote, heapSnapshotGarbageNote, heapSnapshotErrorNote, heapSnapshotExitNote, result.heapPeakNote, idleNote].filter((s): s is string => s !== undefined).map((s) => `note: ${s}\n`).join("");
-        const finalDo = snapshotRetryDo !== undefined || idleDo !== undefined ? `\ndo: ${overallDo}` : "";
-        io.stdout(`${scratchNote}\n${extra}\n${textBlocks.join("\n\n")}${finalDo}\n`);
+        const reportPath = `${result.scratchDir}/report.txt`;
+        const reportBody = `${textBlocks.join("\n\n")}\n`;
+        writeFileSync(reportPath, reportBody);
+        const visibleBlocks = textBlocks.map((block) => block.replace(/\n\ndo: [^\n]+$/, ""));
+        const childLines = [
+          `child exit: ${result.exitCode}`,
+          `child stdout: ${result.childStdoutPath}`,
+          ...result.childStdoutTail.map((line) => `  ${line}`),
+          `child stderr: ${result.childStderrPath}`,
+          ...result.childStderrTail.map((line) => `  ${line}`),
+        ].join("\n");
+        io.stdout(`${scratchNote}\n${childLines}\n${extra}\n${visibleBlocks.join("\n\n")}\nreport: ${reportPath}\ndo: ${overallDo}\n`);
       }
       return result.exitCode;
     }

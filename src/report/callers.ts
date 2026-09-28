@@ -1,6 +1,5 @@
-// Responsibility: `callers` - which code leads into a function: by default, a tree of its direct
-// callers merged by function key, depth 2, walked upward (fn's immediate caller first, then its
-// caller's caller, ...), with a non-own subtree collapsed into one line (`--expand` lifts that).
+// Responsibility: `callers` - which own code reaches a non-own function, grouped by the nearest
+// own frame. Own targets and `--direct` use the direct caller tree, walked upward.
 // No "(self)" row here - self time is a property of the function itself, not of who called it.
 // The older per-sample-path list lives behind `--paths` - see report/callees.ts's own comment on
 // why a flat list of distinct paths told an agent nothing once they scattered across hundreds of
@@ -14,6 +13,75 @@ import { buildCallTree, groupKeyPaths } from "../model.js";
 import { formatFrameCount, formatPercent, formatValue, isSpecialFrame, metricUnit, roundShare, roundTreeShares, shQuote } from "./summary.js";
 
 const DEFAULT_COUNT = 10;
+
+export interface OwnCallerData {
+  metric: Metric;
+  unit: "us" | "bytes";
+  function: string;
+  total: number;
+  callers: { key: string; value: number; share: number; framesBetween: number }[];
+  cut: number;
+  do: string;
+}
+
+/** A non-own target is actionable only after its package or native frames collapse back to the
+ * nearest editable frame. Keep different bridge lengths separate so the count stays truthful. */
+export function buildOwnCallers(
+  analysis: ProfileAnalysis,
+  fn: AnalyzedFunction,
+  profilePath: string,
+  n = DEFAULT_COUNT,
+  windowArgs = "",
+): OwnCallerData {
+  const grouped = new Map<string, { key: string; value: number; bridges: Map<number, number> }>();
+  for (const path of analysis.paths) {
+    const target = path.keys.lastIndexOf(fn.key);
+    if (target < 0) continue;
+    let own = target - 1;
+    while (own >= 0 && analysis.functions.get(path.keys[own]!)?.area !== "own") own--;
+    if (own < 0) continue;
+    const key = path.keys[own]!;
+    const framesBetween = target - own - 1;
+    const row = grouped.get(key) ?? { key, value: 0, bridges: new Map<number, number>() };
+    row.value += path.value;
+    row.bridges.set(framesBetween, (row.bridges.get(framesBetween) ?? 0) + path.value);
+    grouped.set(key, row);
+  }
+  const all = [...grouped.values()]
+    .map((row) => ({
+      key: row.key,
+      value: row.value,
+      framesBetween: [...row.bridges.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 0,
+    }))
+    .sort((a, b) => b.value - a.value || a.key.localeCompare(b.key));
+  const shown = all.slice(0, n).map((row) => ({ ...row, share: roundShare(fn.total > 0 ? row.value / fn.total : 0) }));
+  const first = shown[0];
+  return {
+    metric: analysis.metric,
+    unit: metricUnit(analysis.metric),
+    function: fn.key,
+    total: fn.total,
+    callers: shown,
+    cut: Math.max(0, all.length - n),
+    do: first === undefined
+      ? `finderscope top ${shQuote(profilePath)}${windowArgs}`
+      : `finderscope callees ${shQuote(profilePath)} ${shQuote(first.key)}${windowArgs}`,
+  };
+}
+
+export function formatOwnCallersText(data: OwnCallerData, profilePath: string, windowArgs = ""): string {
+  const lines = [`profile: ${profilePath}`, "", `finderscope callers "${data.function}" (total ${formatValue(data.metric, data.total)})`, ""];
+  for (const row of data.callers) {
+    const bridge = row.framesBetween === 0 ? "direct" : `${row.framesBetween} ${row.framesBetween === 1 ? "frame" : "frames"} between`;
+    lines.push(`  ${formatValue(data.metric, row.value).padStart(8)}  ${formatPercent(row.share).padStart(6)}  ${row.key} (${bridge})`);
+  }
+  if (data.cut > 0) {
+    const count = data.callers.length + data.cut;
+    lines.push(`  … ${data.cut} more (finderscope callers ${shQuote(profilePath)} ${shQuote(data.function)} -n ${count}${windowArgs})`);
+  }
+  lines.push("", `do: ${data.do}`);
+  return lines.join("\n");
+}
 
 export interface CallersTreeOptions {
   depth?: number;

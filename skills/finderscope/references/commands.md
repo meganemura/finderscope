@@ -9,15 +9,17 @@ Every text report ends with one runnable `do:` command. Use `--json` when anothe
 For a heap snapshot, `finderscope '<snapshot>' [-n N] [--json]` ranks constructors by self size.
 `-n` expands the collapsed single-retainer list.
 
-The summary shows your code top-down, areas, ranked functions, hot paths, and the next command.
+The summary ranks own functions by caused cost. A row includes self cost, the three largest
+non-own entry calls with their areas, and one bounded own caller chain. Use `callees` for leaves.
 `--root` shortens paths below the directory. It does not change area classification.
 `--from` and `--to` select a half-open time window in decimal milliseconds from the first sample.
 Give both window flags together. They work with CPU profiles.
 
 ## Top
 
-`finderscope top '<profile>' [--by self|total|root] [--area area] [--from ms --to ms] [-n N] [--json]`
+`finderscope top '<profile>' [--by caused|self|total|root] [--leaf function] [--area area] [--from ms --to ms] [-n N] [--json]`
 
+The default ranks own functions by caused cost. `--leaf` keeps only cost ending at one leaf.
 `--by self` ranks direct work. `--by total` ranks inclusive work.
 `--by root` ranks the roots from `your code, top down`.
 `--area` selects one area, such as `own`, `node`, or a package name.
@@ -34,10 +36,11 @@ Every constructor key and `#id` printed by a snapshot report works as the argume
 
 ## Callers
 
-`finderscope callers '<profile>' '<function>' [--expand] [--paths] [--from ms --to ms] [-n N] [--json]`
+`finderscope callers '<profile>' '<function>' [--direct] [--expand] [--paths] [--from ms --to ms] [-n N] [--json]`
 
 This command shows the paths that reach a function.
-The default output merges direct callers into a tree.
+For a non-own target, the default groups paths by the nearest own caller and collapses intervening
+frames to a count. `--direct` restores the direct caller tree.
 `--expand` opens non-own subtrees. `--paths` selects the flat path list.
 
 ## Callees
@@ -65,9 +68,11 @@ This command ranks changes in function share and area share. Both profiles must 
 
 ## Run
 
-`finderscope run [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-threshold percent] [--heap-snapshot-min MB] [--exit-on-signal] [--root dir] -- <command...>`
+`finderscope run [--child-output capture|inherit] [--heap] [--heap-peak] [--heap-snapshot] [--heap-snapshot-threshold percent] [--heap-snapshot-min MB] [--exit-on-signal] [--root dir] -- <command...>`
 
 This command adds V8 profile flags to the supplied command and its Node child processes.
+It captures child output by default, prints ten bounded tail lines from each stream, and writes
+`report.txt`. `--json` writes `report.json`. `--child-output inherit` restores live output.
 `--heap` also writes a heap profile. `--heap-peak` requests a snapshot near a configured heap limit.
 Pass a heap cap to Node when you use `--heap-peak`, such as `--max-old-space-size=<MiB>`.
 `--heap-snapshot` keeps one snapshot near the observed `heapUsed` peak. Its default threshold is

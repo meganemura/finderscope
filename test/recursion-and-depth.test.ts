@@ -7,6 +7,7 @@ import { analyzeCpuProfile } from "../src/model.js";
 import { parseCpuProfile } from "../src/profile/cpu.js";
 import { buildCalleesTree, formatCalleesTreeText } from "../src/report/callees.js";
 import { buildCallersTree, formatCallersTreeText } from "../src/report/callers.js";
+import { buildSummary } from "../src/report/summary.js";
 
 const ROOT = "/project";
 
@@ -39,6 +40,24 @@ test("direct recursion (A calls A, then A calls B) merges into one node with a r
   const bRow = data.children.find((c) => c.key === fnB.key);
   assert.ok(bRow !== undefined);
   assert.equal(bRow!.value, 2000);
+});
+
+test("summary omits the candidate's recursive copies and marks another repeated caller", () => {
+  const json = {
+    nodes: [
+      { id: 0, callFrame: { functionName: "(root)", url: "", lineNumber: 0, columnNumber: 0 }, children: [1] },
+      { id: 1, callFrame: { functionName: "caller", url: "file:///project/src/caller.js", lineNumber: 0, columnNumber: 0 }, children: [2] },
+      { id: 2, callFrame: { functionName: "caller", url: "file:///project/src/caller.js", lineNumber: 0, columnNumber: 0 }, children: [3] },
+      { id: 3, callFrame: { functionName: "candidate", url: "file:///project/src/candidate.js", lineNumber: 0, columnNumber: 0 }, children: [4] },
+      { id: 4, callFrame: { functionName: "candidate", url: "file:///project/src/candidate.js", lineNumber: 0, columnNumber: 0 }, children: [5] },
+      { id: 5, callFrame: { functionName: "read", url: "node:fs", lineNumber: 0, columnNumber: 0 }, children: [] },
+    ],
+    samples: [5, 5],
+    timeDeltas: [0, 1000, 1000],
+  };
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: ROOT });
+  const candidate = buildSummary(analysis, "profile.cpuprofile").fixCandidates[0]!;
+  assert.deepEqual(candidate.reachedFrom, ["caller src/caller.js:1:1 (recursive)"]);
 });
 
 test("a node truncated by the depth limit (not the children budget) carries depthCut", () => {

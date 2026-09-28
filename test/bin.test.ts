@@ -37,7 +37,7 @@ test("running dist/bin.js through a symlink still works", () => {
   symlinkSync(binPath, link);
   try {
     const output = execFileSync(link, [fixture, "--root", "/project"], { encoding: "utf8" });
-    assert.match(output, /finderscope summary/);
+    assert.match(output, /fix candidates:/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -47,7 +47,7 @@ test("running dist/bin.js from a path that contains a space still works", () => 
   const dir = mkdtempSync(join(tmpdir(), "finderscope bin space "));
   try {
     const output = execFileSync(process.execPath, [binPath, fixture, "--root", "/project"], { encoding: "utf8", cwd: dir });
-    assert.match(output, /finderscope summary/);
+    assert.match(output, /fix candidates:/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -59,7 +59,7 @@ test("dist/bin.js invoked directly (no explicit `node`) still works - exercises 
   try {
     mkdirSync(dir, { recursive: true });
     const output = execFileSync(binPath, [fixture, "--root", "/project"], { encoding: "utf8", cwd: dir });
-    assert.match(output, /finderscope summary/);
+    assert.match(output, /fix candidates:/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -78,7 +78,7 @@ test("dist/cli.js run -- <command> still actually runs the command when invoked 
   const busyScript = join(here, "fixtures", "busy-script.js");
   const output = execFileSync(process.execPath, [cliPath, "run", "--", process.execPath, busyScript], { encoding: "utf8" });
   assert.match(output, /scratch dir:/);
-  assert.match(output, /finderscope summary/);
+  assert.match(output, /fix candidates:/);
 });
 
 test("dist/cli.js works the same through a symlink", () => {
@@ -87,7 +87,7 @@ test("dist/cli.js works the same through a symlink", () => {
   symlinkSync(cliPath, link);
   try {
     const output = execFileSync(process.execPath, [link, fixture, "--root", "/project"], { encoding: "utf8" });
-    assert.match(output, /finderscope summary/);
+    assert.match(output, /fix candidates:/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

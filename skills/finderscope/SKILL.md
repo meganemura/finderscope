@@ -1,6 +1,6 @@
 ---
 name: finderscope
-description: Use finderscope when Node is slow or heavy, a test or CLI takes too long, or you need a before-and-after comparison. It gives ranked functions, your own code top-down, and the hot lines.
+description: Use finderscope when Node is slow or heavy, a test or CLI takes too long, or you need a before-and-after comparison. It ranks the editable functions that caused the work and names the next command.
 ---
 
 # Finderscope
@@ -10,7 +10,8 @@ Use the report to choose one source location and one next command.
 ## Workflow
 
 1. Run `finderscope run -- <cmd>`.
-2. Read `your code, top down` first.
+2. Read `fix candidates` first. Start with the largest caused cost.
+   The breakdown names the largest non-own calls that each candidate made.
 3. Run the command from the final `do:` line.
 4. Run `finderscope lines '<profile>' '<function-key>'` for a hot function's own lines.
 5. For a heap snapshot, run `finderscope retainers '<snapshot>' '<constructor-or-#id>'`.
@@ -32,11 +33,12 @@ a large heap. Finderscope skips that write when the process is near its V8 heap 
 | Command | Question |
 |---|---|
 | `finderscope '<profile>'` | What matters first, and what command comes next? |
-| `finderscope top '<profile>'` | Which functions or own roots rank highest? |
+| `finderscope top '<profile>'` | Which own functions caused the most cost? |
+| `finderscope top '<profile>' --leaf '<function-key>'` | Which own functions caused this leaf's self time? |
 | `finderscope top '<snapshot>'` | Which constructor groups allocate the most heap themselves? |
 | `finderscope top '<snapshot>' --by retained` | Which constructor groups retain the most heap? |
 | `finderscope retainers '<snapshot>' '<constructor-or-#id>'` | Which root paths retain this group or object? |
-| `finderscope callers '<profile>' '<function-key>'` | Which call paths reach this function? |
+| `finderscope callers '<profile>' '<function-key>'` | Which nearest own frames reach this non-own function? |
 | `finderscope callees '<profile>' '<function-key>'` | Where does this function's total time go? |
 | `finderscope lines '<profile>' '<function-key>'` | Which lines hold this function's self time? |
 | `finderscope diff '<before-profile>' '<after-profile>'` | Which function and area shares changed most? |

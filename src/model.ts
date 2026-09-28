@@ -20,7 +20,31 @@ export interface AnalyzedFunction {
   area: string;
   self: number;
   total: number;
+  /** Deepest-own attribution prevents one sample from inflating every editable ancestor. */
+  caused: number;
 }
+
+export interface CausedEntry {
+  key: string;
+  name: string;
+  area: string;
+  value: number;
+}
+
+export interface CausedFunction {
+  key: string;
+  value: number;
+  /** This stays separate because an own leaf has no non-own area entry to carry its value. */
+  self: number;
+  /** The first non-own frame below this function is the call its source made. */
+  entries: Map<string, CausedEntry>;
+  /** Leaf identity remains separate because `top --leaf` filters by the end of the stack. */
+  leaves: Map<string, number>;
+  /** Aggregation selects one evidence-backed route without repeating every sampled path. */
+  callerChains: Map<string, { hops: { key: string; recursive: boolean }[]; value: number }>;
+}
+
+export type NotCausedCategory = "module loading" | "gc" | "idle" | "program" | "others";
 
 export interface CallPath {
   /** Already folded for display; see fold() below. */
@@ -50,10 +74,13 @@ export interface ProfileAnalysis {
    *  truncate and fold these themselves around one function. */
   paths: { keys: string[]; value: number }[];
   /** Every contribution's (fromKey, toArea) attribution - the last own frame before its leaf, and
-   *  the leaf's own area - aggregated by that pair, unsorted and uncapped. report/summary.ts
-   *  groups these by area and applies its own display and `do:` thresholds. See
-   *  computeHandoffs() below for why each contribution attributes to at most one pair. */
+   *  the leaf's own area - aggregated by that pair, unsorted and uncapped. See computeHandoffs()
+   *  below for why each contribution attributes to at most one pair. */
   handoffs: Handoff[];
+  /** This partition is explicit so property tests can prove that no contribution counts twice. */
+  caused: Map<string, CausedFunction>;
+  /** These fixed categories keep startup and idle costs visible without an unbounded area list. */
+  notCaused: Map<NotCausedCategory, number>;
   /**
    * Self time attributed to one source line inside a function, from V8's own `positionTicks`
    * (see computeLineSelfTimes()) - function key -> "path:line" (the same display convention a
@@ -906,7 +933,7 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
     let fn = functions.get(key);
     if (fn === undefined) {
       const meta = keyMeta.get(key)!;
-      fn = { key, name: meta.name, area: meta.area, self: 0, total: 0 };
+      fn = { key, name: meta.name, area: meta.area, self: 0, total: 0, caused: 0 };
       functions.set(key, fn);
     }
     return fn;
@@ -916,6 +943,8 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
   const lineReadPaths = new Map<string, { path: string; line: number }>();
 
   const paths: { keys: string[]; value: number }[] = [];
+  const caused = new Map<string, CausedFunction>();
+  const notCaused = new Map<NotCausedCategory, number>();
   for (const contribution of input.contributions) {
     if (contribution.value <= 0) continue;
     const own = info.get(contribution.nodeId)!;
@@ -930,6 +959,54 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
 
     const keys = chainOf(input.nodes, contribution.nodeId).map((id) => info.get(id)!.key);
     paths.push({ keys, value: contribution.value });
+
+    const ownIndexes = keys.flatMap((key, index) => infoForKeyArea(key, keyMeta) === "own" ? [index] : []);
+    const deepestOwnIndex = ownIndexes.at(-1);
+    if (deepestOwnIndex === undefined) {
+      const category = notCausedCategory(keys, keyMeta);
+      notCaused.set(category, (notCaused.get(category) ?? 0) + contribution.value);
+      continue;
+    }
+
+    const causedKey = keys[deepestOwnIndex]!;
+    const fn = ensure(causedKey);
+    fn.caused += contribution.value;
+    let entry = caused.get(causedKey);
+    if (entry === undefined) {
+      entry = { key: causedKey, value: 0, self: 0, entries: new Map(), leaves: new Map(), callerChains: new Map() };
+      caused.set(causedKey, entry);
+    }
+    entry.value += contribution.value;
+    if (deepestOwnIndex === keys.length - 1) {
+      entry.self += contribution.value;
+    } else {
+      const leafKey = keys.at(-1)!;
+      const entryKey = keys[deepestOwnIndex + 1]!;
+      const meta = keyMeta.get(entryKey)!;
+      const called = entry.entries.get(entryKey) ?? { key: entryKey, name: meta.name, area: meta.area, value: 0 };
+      called.value += contribution.value;
+      entry.entries.set(entryKey, called);
+      entry.leaves.set(leafKey, (entry.leaves.get(leafKey) ?? 0) + contribution.value);
+    }
+
+    const callerKeys = ownIndexes
+      .filter((index) => index < deepestOwnIndex)
+      .map((index) => keys[index]!)
+      .reverse()
+      .filter((key) => key !== causedKey);
+    const callerGroups: { key: string; recursive: boolean }[] = [];
+    for (const key of callerKeys) {
+      const previous = callerGroups.at(-1);
+      if (previous?.key === key) previous.recursive = true;
+      else callerGroups.push({ key, recursive: false });
+    }
+    const hops = callerGroups.slice(0, 3);
+    if (hops.length > 0) {
+      const chainId = JSON.stringify(hops);
+      const chain = entry.callerChains.get(chainId) ?? { hops, value: 0 };
+      chain.value += contribution.value;
+      entry.callerChains.set(chainId, chain);
+    }
   }
 
   // Every key reaching this point was produced by classify() during buildNodeInfo above, so
@@ -938,7 +1015,21 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
   const hottest = groupKeyPaths(paths, areaOf, input.total, foldAroundOwnFrames).slice(0, input.hottestPathCount);
   const handoffs = computeHandoffs(paths, areaOf);
 
-  return { metric: input.metric, total: input.total, functions, areaTotals, hottest, paths, handoffs, lineSelfTimes, lineReadPaths, functionReadPaths };
+  return { metric: input.metric, total: input.total, functions, areaTotals, hottest, paths, handoffs, caused, notCaused, lineSelfTimes, lineReadPaths, functionReadPaths };
+}
+
+function infoForKeyArea(key: string, keyMeta: Map<string, { area: string; name: string }>): string {
+  return keyMeta.get(key)?.area ?? "unknown";
+}
+
+function notCausedCategory(
+  keys: string[],
+  keyMeta: Map<string, { area: string; name: string }>,
+): NotCausedCategory {
+  const leafArea = infoForKeyArea(keys.at(-1)!, keyMeta);
+  if (leafArea === "gc" || leafArea === "idle" || leafArea === "program") return leafArea;
+  if (keys.some((key) => /node:internal\/(?:modules|bootstrap\/realm|bootstrap\/node)/.test(key))) return "module loading";
+  return "others";
 }
 
 /**
