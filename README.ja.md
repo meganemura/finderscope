@@ -42,7 +42,7 @@ finderscope --help | -h | help
 `<function>` には、report が表示した function key（`name path:line:col`）を指定できる。
 function 名、または名前の一部が 1 個の function だけに一致する場合も指定できる。
 local path の別名は `realpath` で解決する。
-macOS では、file が存在しない場合も `/tmp` と `/private/tmp`、`/var` と `/private/var` を同じ path として扱う。
+file がもう存在しない場合は、一方の path がもう一方の path で終わっていれば一致とみなす。macOS の一時 directory のような symlink の prefix も、これで解決する。
 一致しない場合は、近い key を使った実行可能な command を最大 3 個表示する。
 
 すべての `--json` report は最上位に `unit` を持つ。CPU profile では `"us"`、heap profile

@@ -1,6 +1,7 @@
 // Responsibility: resolve a `<function>` CLI argument against an analysis's function map: an
 // exact function key first, then the same key through realpath (a symlinked directory named
-// differently in the query than in the profile - /tmp vs /private/tmp on macOS - still resolves),
+// differently in the query than in the profile still resolves, and so does a missing path that one
+// side spells with a longer prefix),
 // then a unique bare name or name substring. A miss ranks close keys for the caller to format as
 // runnable commands.
 // Boundary: does not know about self/total/area or report data - only lookup and error shape.
@@ -77,26 +78,35 @@ function resolveReal(path: string, root: string): string {
   return real;
 }
 
-/** macOS exposes /tmp and /var through /private, but an old profile can outlive the path it
- * named. When realpath cannot inspect the typed path, these pairs preserve the platform alias
- * that realpath would have returned while avoiding aliases for unrelated path segments. */
-function pathVariants(path: string, root: string): Set<string> {
-  const abs = isAbsolute(path) ? path : join(root, path);
-  const result = new Set([resolveReal(path, root)]);
-  if (existsSync(abs)) return result;
-  if (abs === "/tmp" || abs.startsWith("/tmp/")) result.add(`/private${abs}`);
-  if (abs === "/private/tmp" || abs.startsWith("/private/tmp/")) result.add(abs.slice("/private".length));
-  if (abs === "/var" || abs.startsWith("/var/")) result.add(`/private${abs}`);
-  if (abs === "/private/var" || abs.startsWith("/private/var/")) result.add(abs.slice("/private".length));
-  return result;
+/** True when `longer` ends with `shorter` at a path-segment boundary, and `shorter` keeps at least
+ * a directory and a file name. A one-segment suffix such as "/main.js" is refused because it would
+ * match every file of that name. */
+function endsWithPath(longer: string, shorter: string): boolean {
+  if (longer.length <= shorter.length || !longer.endsWith(shorter) || !shorter.startsWith("/")) return false;
+  return shorter.split("/").filter((segment) => segment.length > 0).length >= 2;
+}
+
+/** Two paths name the same file when their realpaths are equal. A profile can outlive the files it
+ * named, and then realpath cannot see through a symlinked prefix (macOS's temporary directory is
+ * one). For a missing path, one path ending with the other also counts. A fixed table of platform
+ * prefixes is refused: the suffix rule covers every symlinked prefix, and resolveFunction still
+ * rejects a suffix that matches more than one function. */
+function samePath(a: string, b: string, root: string): boolean {
+  const realA = resolveReal(a, root);
+  const realB = resolveReal(b, root);
+  if (realA === realB) return true;
+  const absA = isAbsolute(a) ? a : join(root, a);
+  const absB = isAbsolute(b) ? b : join(root, b);
+  if (existsSync(absA) && existsSync(absB)) return false;
+  return endsWithPath(realA, realB) || endsWithPath(realB, realA);
 }
 
 /**
  * True when `query` and `candidateKey` name the same function (same name, line, column) whose
  * paths resolve to the same real file - even when the query spelled a symlinked directory
- * differently from the profile (e.g. /tmp vs. macOS's real /private/tmp). Both sides must parse as
- * a real `name path:line:col` key. Missing paths use the explicit macOS aliases in pathVariants;
- * a query with no such shape (a special frame or name fragment) does not compare paths.
+ * differently from the profile (a symlinked prefix). Both sides must parse as a real
+ * `name path:line:col` key. Missing paths use the suffix rule in samePath; a query with no such
+ * shape (a special frame or name fragment) does not compare paths.
  */
 function sameFunctionByRealpath(candidate: AnalyzedFunction, query: string, root: string): boolean {
   const q = parseKeyForName(query, candidate.name);
@@ -104,8 +114,7 @@ function sameFunctionByRealpath(candidate: AnalyzedFunction, query: string, root
   const c = parseKeyForName(candidate.key, candidate.name);
   if (c === undefined) return false;
   if (c.name !== q.name || c.line !== q.line || c.column !== q.column) return false;
-  const candidatePaths = pathVariants(c.path, root);
-  return [...pathVariants(q.path, root)].some((path) => candidatePaths.has(path));
+  return samePath(c.path, q.path, root);
 }
 
 function editDistance(a: string, b: string): number {
@@ -136,8 +145,7 @@ function closestFunctions(analysis: ProfileAnalysis, query: string, root: string
   const sameFile = (fn: AnalyzedFunction): boolean => {
     const candidate = parseKeyForName(fn.key, fn.name);
     if (candidate === undefined) return false;
-    const candidatePaths = pathVariants(candidate.path, root);
-    return queryPaths.some((queryPath) => [...pathVariants(queryPath, root)].some((path) => candidatePaths.has(path)));
+    return queryPaths.some((queryPath) => samePath(candidate.path, queryPath, root));
   };
   return [...analysis.functions.values()]
     .map((fn) => ({

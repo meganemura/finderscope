@@ -39,8 +39,9 @@ just that one.
 
 `<function>` accepts either a function key exactly as a report printed it (`name path:line:col`),
 or a bare name or name substring that matches exactly one function. Local path aliases resolve
-through `realpath`, including missing `/tmp` versus `/private/tmp` and `/var` versus `/private/var`
-paths on macOS. A failed lookup prints up to three runnable commands for the closest keys.
+through `realpath`. When the file no longer exists, a path that ends with the other path also
+matches, so a symlinked prefix such as macOS's temporary directory still resolves. A failed lookup
+prints up to three runnable commands for the closest keys.
 
 Every `--json` report carries a top-level `unit` (`"us"` for a cpu profile, `"bytes"` for a heap
 profile) that every value and total in it is measured in; every share is a 0..1 fraction rounded to

@@ -121,8 +121,10 @@ streaming summary as a snapshot passed directly on the command line.
 - A function is printed as `name path:line:col`, with 1-based line and column. The same text works
   as the `<function>` argument, so an agent can copy it into the next command. A bare name or a
   plain substring of the name also works when it matches one function. A full key resolves both
-  paths through `realpath`; a missing typed path also checks the macOS `/tmp` and `/private/tmp`,
-  or `/var` and `/private/var`, aliases. A failed lookup prints up to three runnable commands for
+  paths through `realpath`. When either file is missing, one path that ends with the other at a
+  segment boundary also matches, if the shorter path keeps a directory and a file name. A fixed
+  table of platform prefixes was refused: the suffix rule covers any symlinked prefix, and a suffix
+  that matches two functions is reported as ambiguous. A failed lookup prints up to three runnable commands for
   close keys, ordered by the same function name, then the same file, then edit distance.
 - When a script has a source map (a `sourceMappingURL` comment or a sibling `.map` file), positions
   are mapped back to the original source, such as a `.ts` file. The mapping uses a small built-in VLQ

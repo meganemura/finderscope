@@ -1,6 +1,7 @@
 // Regression test: a <function> query whose path spells a symlinked directory differently from
-// the profile (a real macOS shape - /tmp is itself a symlink to /private/tmp) still resolves
-// through resolveFunction, by comparing realpath once an exact key match fails.
+// the profile (a real macOS shape: the temporary directory is a symlink) still resolves through
+// resolveFunction, by comparing realpath once an exact key match fails, or by the suffix rule
+// once the files are gone.
 import { test } from "vitest";
 import assert from "node:assert/strict";
 import * as hegel from "@hegeldev/hegel";
@@ -78,11 +79,40 @@ test(
   20_000,
 );
 
-test("a missing /tmp spelling matches a recorded /private/tmp path", () => {
-  const suffix = `finderscope missing ${process.pid}/main.js`;
-  const analysis = analyzeCpuProfile(parseCpuProfile(makeProfile(`/private/tmp/${suffix}`)), { root: "/project" });
+// A profile can outlive its files, and then realpath cannot see through a symlinked prefix. The
+// paths below do not exist, so only the suffix rule can match them.
+const MISSING = `/finderscope-missing-${process.pid}`;
+
+test("a missing path matches a recorded path that adds a prefix in front of it, and the reverse", () => {
+  const suffix = `scratch dir ${process.pid}/main.js`;
+  const analysis = analyzeCpuProfile(parseCpuProfile(makeProfile(`${MISSING}/link-target/${suffix}`)), { root: "/project" });
   const fn = [...analysis.functions.values()].find((candidate) => candidate.name === "main")!;
-  assert.equal(resolveFunction(analysis, `main /tmp/${suffix}:1:1`, "finderscope top 'p'", "/project"), fn);
+  assert.equal(resolveFunction(analysis, `main /${suffix}:1:1`, "finderscope top 'p'", "/project"), fn);
+
+  const shorter = analyzeCpuProfile(parseCpuProfile(makeProfile(`/${suffix}`)), { root: "/project" });
+  const shorterFn = [...shorter.functions.values()].find((candidate) => candidate.name === "main")!;
+  assert.equal(resolveFunction(shorter, `main ${MISSING}/link-target/${suffix}:1:1`, "finderscope top 'p'", "/project"), shorterFn);
+});
+
+test("a one-segment suffix never matches a missing path", () => {
+  const analysis = analyzeCpuProfile(parseCpuProfile(makeProfile(`${MISSING}/deep/main.js`)), { root: "/project" });
+  assert.throws(
+    () => resolveFunction(analysis, "main /main.js:1:1", "finderscope top 'p'", "/project"),
+    /no function matches/,
+  );
+});
+
+test("a suffix that matches two recorded paths is ambiguous, not a guess", () => {
+  const json = makeProfile(`${MISSING}/a/src/main.js`);
+  (json.nodes[0] as { children: number[] }).children.push(3);
+  json.nodes.push({ id: 3, callFrame: { functionName: "main", url: `file://${MISSING}/b/src/main.js`, lineNumber: 0, columnNumber: 0 }, children: [] });
+  json.samples.push(3);
+  json.timeDeltas.push(1000);
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
+  assert.throws(
+    () => resolveFunction(analysis, "main /src/main.js:1:1", "finderscope top 'p'", "/project"),
+    /matches more than one function/,
+  );
 });
 
 test("a query for a nonexistent path still falls through to substring matching, not a crash", () => {
