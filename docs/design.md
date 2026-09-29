@@ -85,7 +85,9 @@ its own `delta` instead: a row whose delta rounds to 0.000 is left out of `funct
 and counted in `functionsCut`/`areasCut` - showing "0.000" would claim a change with no size at all,
 the one thing that list ranks.
 
-`run` sets `NODE_OPTIONS`, so child Node processes write profiles too. It reports each process, the
+`run` sets `NODE_OPTIONS`, so child Node processes write profiles too. Node builds that reject
+`--cpu-prof` in `NODE_OPTIONS` get the same `.cpuprofile` from a `--require` preload instead
+(`--require` is on the allowlist). That preload installs no signal handler. It reports each process, the
 largest first. It runs only the command the caller gave; SIGINT and SIGTERM are forwarded to it.
 By default, child stdout and stderr go to files. The terminal gets ten lines from each tail, with
 each line bounded to 200 characters. `--child-output inherit` restores live output. The complete

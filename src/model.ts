@@ -274,8 +274,10 @@ function isFileUrl(url: string): boolean {
   return url.startsWith("file://") || isAbsolute(url);
 }
 
+// cpu-prof-preload.cjs is the stand-in for --cpu-prof on Node builds that reject that flag in
+// NODE_OPTIONS. Its frames are finderscope's own sampling, the same as the other two preloads.
 function isFinderscopePreloadPath(path: string): boolean {
-  return /(?:^|[/\\])finderscope-[^/\\]+[/\\](?:heap-snapshot|signal-exit)-preload\.cjs$/.test(path);
+  return /(?:^|[/\\])finderscope-[^/\\]+[/\\](?:heap-snapshot|signal-exit|cpu-prof)-preload\.cjs$/.test(path);
 }
 
 export function classifyScriptArea(url: string): string {

@@ -37,7 +37,7 @@ test(
 test("injected preload paths are always classified outside own code", () =>
   hegel.test((tc) => {
     const suffix = tc.draw(gs.text({ alphabet: "abcdefghijklmnopqrstuvwxyz0123456789", minSize: 1, maxSize: 20 }));
-    const name = tc.draw(gs.sampledFrom(["heap-snapshot-preload.cjs", "signal-exit-preload.cjs"]));
+    const name = tc.draw(gs.sampledFrom(["heap-snapshot-preload.cjs", "signal-exit-preload.cjs", "cpu-prof-preload.cjs"]));
     const path = `/tmp/finderscope-${suffix}/${name}`;
     assert.equal(classifyScriptArea(path), "finderscope");
   }, { testCases: 100 }));

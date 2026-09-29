@@ -286,6 +286,19 @@ test("a negative timeDelta is clamped to 0, not allowed to make a sample's time 
   assert.ok(profile.sampleTimes.every((t) => t >= 0));
 });
 
+test("the last sample time is the lower median, including ties and an even count", () => {
+  const nodes = [
+    { id: 0, callFrame: { functionName: "(root)", url: "", lineNumber: 0, columnNumber: 0 }, children: [1] },
+    { id: 1, callFrame: { functionName: "leaf", url: "file:///project/a.js", lineNumber: 0, columnNumber: 0 }, children: [] },
+  ];
+  // Next-delta times are 8, 1, 50, 3. Sorted: 1, 3, 8, 50. Index floor(3/2) is 3, not the mean.
+  const varied = parseCpuProfile({ nodes, samples: [1, 1, 1, 1, 1], timeDeltas: [10, 8, 1, 50, 3, 100] });
+  assert.deepEqual(varied.sampleTimes, [8, 1, 50, 3, 3]);
+  // Every interval equal: one 3-way partition, and the median is that interval.
+  const tied = parseCpuProfile({ nodes, samples: [1, 1, 1, 1, 1], timeDeltas: [0, 5, 5, 5, 5, 9] });
+  assert.deepEqual(tied.sampleTimes, [5, 5, 5, 5, 5]);
+});
+
 // A mapped source that is itself a URL with a scheme other than file: (webpack://...) - never
 // run through relative(), and "own" only when its own text has no node_modules segment.
 function withScratchDir(fn: (dir: string) => void): void {

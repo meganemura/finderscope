@@ -52,8 +52,9 @@ test("cli.ts's `run` attributes an ENOENT command to the caller, not to a finder
 
 test("run --json still prints exactly one JSON object, even when no profile was written", async () => {
   // A non-Node command: NODE_OPTIONS is set, but nothing here is Node to read it, so no profile
-  // is ever written - the actual "no profile" case, unlike `node -e ...` (which does write one:
-  // --cpu-prof is on Node's own NODE_OPTIONS allowlist, confirmed by hand before writing this).
+  // is ever written - the actual "no profile" case, unlike `node -e ...` (which does write one,
+  // either from --cpu-prof when NODE_OPTIONS allows it, or from the cpu-prof preload when it does
+  // not).
   const { io, out } = capture();
   const code = await main(["run", "--json", "--", "true"], io);
   assert.equal(code, 0);

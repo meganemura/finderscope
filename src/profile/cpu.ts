@@ -124,11 +124,90 @@ interface RawCpuProfile {
   timeDeltas?: unknown;
 }
 
-function medianLower(values: number[]): number {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor((sorted.length - 1) / 2);
-  return sorted[mid]!;
+/** Same ordering as `[...values].sort((a, b) => a - b)`. A raw `<` was refused: for some large
+ *  finite pairs `a - b` rounds to 0 while `<` still distinguishes them, and the oracle in
+ *  test/helpers/oracle.ts still sorts with `a - b`. The two must pick the same element. */
+function sortLess(a: number, b: number): boolean {
+  return a - b < 0;
+}
+
+function swap(values: number[], i: number, j: number): void {
+  const saved = values[i]!;
+  values[i] = values[j]!;
+  values[j] = saved;
+}
+
+/** Index of the median of the three endpoints, under sortLess. A fixed end element was refused
+ *  as the pivot: sample intervals are often already nearly sorted, and that pivot is quadratic. */
+function medianOfThreeIndex(values: number[], lo: number, hi: number): number {
+  const mid = lo + ((hi - lo) >> 1);
+  const left = values[lo]!;
+  const middle = values[mid]!;
+  const right = values[hi]!;
+  if (sortLess(left, middle)) {
+    if (sortLess(middle, right)) return mid;
+    return sortLess(left, right) ? hi : lo;
+  }
+  if (sortLess(middle, right)) return sortLess(left, right) ? lo : hi;
+  return mid;
+}
+
+/** Dutch-national-flag split of values[lo..hi]. `lt`/`gt` bound the run equal to the pivot, so a
+ *  cpu profile whose deltas are almost all the sampling interval finishes in one pass instead of
+ *  shrinking by a single element per step. */
+function partitionAroundMedian(values: number[], lo: number, hi: number): { lt: number; gt: number } {
+  swap(values, lo, medianOfThreeIndex(values, lo, hi));
+  const pivot = values[lo]!;
+  let lt = lo;
+  let i = lo;
+  let gt = hi;
+  while (i <= gt) {
+    const value = values[i]!;
+    if (sortLess(value, pivot)) {
+      swap(values, lt, i);
+      lt++;
+      i++;
+    } else if (sortLess(pivot, value)) {
+      swap(values, i, gt);
+      gt--;
+    } else {
+      i++;
+    }
+  }
+  return { lt, gt };
+}
+
+/**
+ * Lower median of `values[0 .. length)`: the element at index floor((length - 1) / 2) after an
+ * ascending `(a, b) => a - b` sort. May reorder only its own copy of that prefix.
+ *
+ * A full sort was refused. On a 2,000,000-sample .cpuprofile, finderscope attributed 29% of the
+ * whole parseCpuProfile run, and every microsecond of this function's self time, to
+ * `[...values].sort` here, and the last sample needs only this one order statistic.
+ * 3-way quickselect returns that same element. The depth guard sorts whatever range is left if
+ * partitioning stops paying for itself, so a hostile input cannot do worse than the sort this
+ * replaced.
+ */
+function medianLower(values: number[], length: number): number {
+  if (length <= 0) return 0;
+  if (length === 1) return values[0]!;
+  const copy = values.slice(0, length);
+  const target = Math.floor((length - 1) / 2);
+  let lo = 0;
+  let hi = length - 1;
+  let guard = 0;
+  const limit = Math.ceil(Math.log2(length)) * 2 + 2;
+  while (lo < hi) {
+    if (guard++ > limit) {
+      const sorted = copy.slice(lo, hi + 1).sort((a, b) => a - b);
+      return sorted[target - lo]!;
+    }
+    const { lt, gt } = partitionAroundMedian(copy, lo, hi);
+    if (target >= lt && target <= gt) return copy[target]!;
+    if (target < lt) hi = lt - 1;
+    else lo = gt + 1;
+  }
+  return copy[lo]!;
 }
 
 /**
@@ -247,8 +326,7 @@ export function parseCpuProfile(json: unknown): NormalizedCpuProfile {
     }
   }
   if (samples.length > 0) {
-    const others = sampleTimes.slice(0, samples.length - 1);
-    sampleTimes[samples.length - 1] = medianLower(others);
+    sampleTimes[samples.length - 1] = medianLower(sampleTimes, samples.length - 1);
   }
 
   const totalDuration = sampleTimes.reduce((a, b) => a + b, 0);

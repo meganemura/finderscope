@@ -5,6 +5,12 @@ may change commands, flags, or output shapes. The version entry will describe ea
 
 ## Unreleased
 
+### Fixed
+
+- `run` writes a CPU profile on Node builds that reject `--cpu-prof` in `NODE_OPTIONS` (Node 22
+  before that flag was allowlisted, and earlier). It loads a `--require` preload instead of exiting
+  before the command starts. The preload installs no signal handler.
+
 ### Changed
 
 - The default summary and `top` rank own functions by caused cost. Each sample belongs to its
@@ -22,6 +28,10 @@ may change commands, flags, or output shapes. The version entry will describe ea
   its scratch directory. `--child-output inherit` restores live child output.
 - `--root` defaults to the Git top level, the nearest `package.json` directory, or the current
   directory, in that order.
+- Parsing a `.cpuprofile` takes the last sample's lower median with a 3-way quickselect instead of
+  sorting every sample time. On a 2,000,000-sample profile, `parseCpuProfile` went from 378ms to
+  about 169ms. `medianLower`'s self time in the same three-pass run went from 478.1ms (29.0% of
+  1.6s) to 18.5ms, with `partitionAroundMedian` at 50.2ms.
 
 ### Added
 

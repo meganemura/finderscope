@@ -1,6 +1,8 @@
 // Responsibility: `run` extends NODE_OPTIONS so each Node process writes CPU, optional heap, and
-// optional peak-snapshot data into one kept scratch directory. On request, it lets catchable
-// signals flush profiles, waits for the named command, and returns every artifact largest first.
+// optional peak-snapshot data into one kept scratch directory. On Node builds that reject
+// --cpu-prof in NODE_OPTIONS, a --require preload writes the CPU profile instead. On request, it
+// lets catchable signals flush profiles, waits for the named command, and returns every artifact
+// largest first.
 // Boundary: never adds a wrapper command and never parses or summarizes a profile. cli.ts owns
 // reports and the callers/callees/top/retainers commands that re-query the kept artifacts.
 
@@ -64,6 +66,72 @@ export class RunInputError extends Error {
   }
 }
 
+function writeCpuProfPreload(scratchDir: string): string {
+  const preloadPath = join(scratchDir, "cpu-prof-preload.cjs");
+  // Inspector's Profiler.stop callback is what actually writes the file. beforeExit covers a
+  // normal drain of the event loop (including a bare `process.exitCode = N`). Wrapping
+  // process.exit covers --exit-on-signal and any caller that exits directly; the callback has
+  // been synchronous in practice, so code after process.exit() does not run. A timeout is the
+  // backstop if the callback never arrives, so a profile write cannot hang shutdown.
+  writeFileSync(preloadPath, `
+const fs = require("node:fs");
+const path = require("node:path");
+const inspector = require("node:inspector");
+const { threadId } = require("node:worker_threads");
+const dir = ${JSON.stringify(scratchDir)};
+let session;
+try {
+  session = new inspector.Session();
+  session.connect();
+} catch {
+  return;
+}
+session.post("Profiler.enable", () => {
+  session.post("Profiler.start", { interval: 1000 }, () => {});
+});
+let stopping = false;
+function writeProfile(done) {
+  if (stopping) {
+    done();
+    return;
+  }
+  stopping = true;
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    done();
+  };
+  const timer = setTimeout(finish, 1000);
+  try {
+    session.post("Profiler.stop", (err, result) => {
+      clearTimeout(timer);
+      try {
+        if (!err && result && result.profile) {
+          const stamp = new Date().toISOString().replace(/[-:]/g, "").replace("T", ".").slice(0, 15);
+          const file = path.join(dir, "CPU." + stamp + "." + process.pid + "." + threadId + ".001.cpuprofile");
+          fs.writeFileSync(file, JSON.stringify(result.profile));
+        }
+      } catch {}
+      try { session.disconnect(); } catch {}
+      finish();
+    });
+  } catch {
+    clearTimeout(timer);
+    finish();
+  }
+}
+process.on("beforeExit", (code) => {
+  writeProfile(() => process.exit(code));
+});
+const originalExit = process.exit;
+process.exit = function (code) {
+  writeProfile(() => originalExit.call(process, code));
+};
+`);
+  return preloadPath;
+}
+
 function exitCodeFor(code: number | null, signal: NodeJS.Signals | null): number {
   if (code !== null) return code;
   if (signal !== null) {
@@ -111,7 +179,15 @@ export function runCommand(options: RunOptions): Promise<RunResult> {
     writeFileSync(childStdoutPath, "");
     writeFileSync(childStderrPath, "");
     const existingNodeOptions = process.env["NODE_OPTIONS"] ?? "";
-    const flags = [`--cpu-prof`, `--cpu-prof-dir=${quoteForNodeOptions(scratchDir)}`];
+    // --cpu-prof joined the NODE_OPTIONS allowlist in the same change as --cpu-prof-dir (Node 23,
+    // and later 22.x). On a build that still rejects it, putting the flag in NODE_OPTIONS makes
+    // Node exit 9 before the command runs, which is what `finderscope run` did on Node 22.14.
+    // --require is allowed, so a preload writes the .cpuprofile instead. It does not install a
+    // signal handler: an unhandled SIGTERM must still kill a process stuck in synchronous code.
+    const cpuProfAllowed = process.allowedNodeEnvironmentFlags.has("--cpu-prof") && process.allowedNodeEnvironmentFlags.has("--cpu-prof-dir");
+    const flags = cpuProfAllowed
+      ? [`--cpu-prof`, `--cpu-prof-dir=${quoteForNodeOptions(scratchDir)}`]
+      : [`--require=${quoteForNodeOptions(writeCpuProfPreload(scratchDir))}`];
     if (options.exitOnSignal) {
       const signalPreloadPath = join(scratchDir, "signal-exit-preload.cjs");
       // V8 flushes CPU profiles on normal process exit. This handler converts an otherwise
