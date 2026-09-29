@@ -43,13 +43,15 @@ to work.
 5. Approve the `publish` environment for that Actions run. The workflow uses Node 24 on
    `ubuntu-latest`. It runs `npm ci`, the build, typecheck, and tests before `npm publish`.
    `prepublishOnly` repeats those checks.
-6. Extract only that version's notes. `--notes-file CHANGELOG.md` would include every version.
-   Use `awk '/^## 0.x.0/{in_version=1;next} /^## /{in_version=0} in_version' CHANGELOG.md > notes.md`.
-   Then run
-   `gh release create v0.x.0 --title v0.x.0 --notes-file notes.md`.
+6. After `npm publish` succeeds, the workflow's `release` job creates the GitHub release. It
+   extracts only that version's section from `CHANGELOG.md` (the whole file would carry every
+   version), and it skips a release that already exists, so re-running the tag is safe. If that job
+   fails, extract the section and create the release by hand:
+   `awk '/^## 0.x.0/{in_version=1;next} /^## /{in_version=0} in_version' CHANGELOG.md > notes.md`,
+   then `gh release create v0.x.0 --title v0.x.0 --notes-file notes.md`.
 7. Validate and install the skill with
    `gh skill install meganemura/finderscope finderscope --scope user --agent claude-code` and
    `gh skill install meganemura/finderscope finderscope --scope user --agent codex`. Run
    `gh skill update` to update installed copies after a release.
 
-The owner performs the commit, tag, push, environment approval, release creation, and npm publish.
+The owner performs the commit, tag, push, and environment approval. The workflow then publishes to npm and creates the GitHub release.
