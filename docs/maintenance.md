@@ -7,8 +7,13 @@ Run the main checks before a release or after a code change:
 ```sh
 npm run build
 npm run typecheck
+npm run archstrict
 npm test
 ```
+
+`npm run archstrict` checks the module boundaries in [`archstrict.config.ts`](../archstrict.config.ts).
+`src/bin.ts` is the process entry. `profile` and `report` are directory modules. Each other file
+under `src/` is its own module.
 
 Run mutation tests separately:
 

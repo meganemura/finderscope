@@ -39,6 +39,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "archstrict": "archstrict check",
     "test": "vitest run",
     "mutation": "stryker run",
     "prepare": "npm run build",
@@ -49,6 +50,7 @@
     "@stryker-mutator/core": "10.0.0",
     "@stryker-mutator/vitest-runner": "10.0.0",
     "@types/node": "26.5.1",
+    "archstrict": "0.1.0",
     "stryker-agent-reporter": "0.1.0",
     "typescript": "6.0.3",
     "vitest": "4.1.11"

@@ -35,7 +35,7 @@ to work.
 
 1. Replace `(unreleased)` in `CHANGELOG.md` with the release date. Set the same version in
    `package.json` and `package-lock.json`.
-2. Run `npm run build`, `npm run typecheck`, and `npm test`.
+2. Run `npm run build`, `npm run typecheck`, `npm run archstrict`, and `npm test`.
 3. Run `npm pack --dry-run`. Read its file list. It must contain `dist/`, `docs/`, `skills/`, both
    READMEs, the changelog, and the license. It must not contain `test/`.
 4. Commit the release as `chore: release 0.x.0`. Tag it as `v0.x.0`. The tag without `v` must equal
