@@ -3,7 +3,7 @@
 The format follows Keep a Changelog, and the versions follow SemVer. Before 1.0, a minor version
 may change commands, flags, or output shapes. The version entry will describe each change.
 
-## Unreleased
+## 0.3.0 (2026-10-01)
 
 ### Fixed
 
