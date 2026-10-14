@@ -8,3 +8,7 @@ CLAUDE.local.md
 .claude-team/
 reports/
 .stryker-tmp/
+.nukadoko/
+.env
+.env.*
+!.env.example

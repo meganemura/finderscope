@@ -16,7 +16,8 @@ export default {
   // - common noise directories that init found on disk (test), plus fixtures.
   //   Remove one of these entries if that directory holds module content.
   // A test file imports across modules as a fixture, and boundary rules
-  // read production code.
+  // read production code. The nukadoko scenarios (features/,
+  // nukadoko.config.ts) test the built CLI the same way.
   exclude: [
     "archstrict.config.ts",
     "archstrict.types.ts",
@@ -24,6 +25,8 @@ export default {
     "**/.*/**",
     "test/**",
     "fixtures/**",
+    "features/**",
+    "nukadoko.config.ts",
   ],
   // src/bin.ts is the process entry. Library code does not import it.
   // Most specific glob wins, so bin.ts carries kind:bin and every other
