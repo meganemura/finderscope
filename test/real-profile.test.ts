@@ -12,7 +12,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { detectProfileKind } from "../src/profile/detect.js";
 import { parseCpuProfile } from "../src/profile/cpu.js";
-import { analyzeCpuProfile } from "../src/model.js";
+import { analyzeCpuProfile, type AnalyzedFunction, type ProfileAnalysis } from "../src/model.js";
 import { buildLines } from "../src/report/lines.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -150,42 +150,55 @@ test("`lines` on a real profile of the tsc-compiled fixture maps its hot, indent
   }
 });
 
-function profileGenerated(files: Record<string, string>, entry: string): { causedBy: (name: string) => number; loading: number; total: number } {
+function profileGenerated(files: Record<string, string>, entry: string): ProfileAnalysis {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), "finderscope-loader-")));
   try {
     for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
     const { dir: profileDir, json } = profileScript(join(dir, entry), dir);
     rmSync(profileDir, { recursive: true, force: true });
-    const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: dir });
-    return {
-      causedBy: (name) => [...analysis.caused.values()].filter((entry) => analysis.functions.get(entry.key)?.name === name).reduce((sum, entry) => sum + entry.value, 0),
-      loading: analysis.notCaused.get("module loading") ?? 0,
-      total: analysis.total,
-    };
+    return analyzeCpuProfile(parseCpuProfile(json), { root: dir });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
-test("a real import() of a large module from an own function counts the load as module loading", () => {
+function named(analysis: ProfileAnalysis, name: string): AnalyzedFunction {
+  const matches = [...analysis.functions.values()].filter((f) => f.name === name && f.area === "own");
+  assert.equal(matches.length, 1, `one own function named ${name}`);
+  return matches[0]!;
+}
+
+test("a real import() of a large module from an own function counts the compile as module loading", () => {
   const heavy = Array.from({ length: 4000 }, (_, i) => `export function f${i}(x) { let s = 0; for (let j = 0; j < x; j++) s += j * ${i}; return s; }`).join("\n");
-  const result = profileGenerated({
+  const analysis = profileGenerated({
     "heavy.mjs": heavy,
     "main.mjs": 'async function start() { const m = await import("./heavy.mjs"); return m.f1(3); }\nawait start();\n',
   }, "main.mjs");
-  assert.ok(result.loading > 4 * result.causedBy("start"), `module loading ${result.loading}us, start caused ${result.causedBy("start")}us`);
+  const compiles = (keys: string[]): boolean => keys.some((key) => key.startsWith("compileSourceTextModule "));
+  const compilingBelow = (key: string): number => analysis.paths
+    .filter((path) => path.keys.includes(key) && compiles(path.keys.slice(path.keys.indexOf(key) + 1)))
+    .reduce((sum, path) => sum + path.value, 0);
+  assert.ok(analysis.paths.some((path) => compiles(path.keys)), "the profile sampled the compile");
+  // Node 22 compiles a dynamic import() after start has returned, so only Node 24 has compile
+  // samples below an own frame.
+  for (const fn of analysis.functions.values()) {
+    if (fn.area !== "own") continue;
+    assert.ok(fn.caused <= fn.total - compilingBelow(fn.key), `${fn.key} caused ${fn.caused}us of ${fn.total}us, ${compilingBelow(fn.key)}us of it compiling`);
+  }
 });
 
 test("a real loop of require() calls for a module already loaded stays on the loop", () => {
-  const result = profileGenerated({
+  const hot = named(profileGenerated({
     "main.cjs": 'function hot() { let n = 0; for (let i = 0; i < 1e5; i++) n += require("node:path").sep.length; return n; }\nhot();\n',
-  }, "main.cjs");
-  assert.ok(result.causedBy("hot") > result.total / 2, `hot caused ${result.causedBy("hot")}us of ${result.total}us`);
+  }, "main.cjs"), "hot");
+  assert.ok(hot.total > 0, "the profile sampled the loop");
+  assert.equal(hot.caused, hot.total);
 });
 
 test("a real loop of require.resolve() calls stays on the loop", () => {
-  const result = profileGenerated({
+  const start = named(profileGenerated({
     "main.cjs": 'function start() { for (let i = 0; i < 3000; i++) { try { require.resolve("./missing" + i); } catch {} } }\nstart();\n',
-  }, "main.cjs");
-  assert.ok(result.causedBy("start") > result.total / 2, `start caused ${result.causedBy("start")}us of ${result.total}us`);
+  }, "main.cjs"), "start");
+  assert.ok(start.total > 0, "the profile sampled the loop");
+  assert.equal(start.caused, start.total);
 });
