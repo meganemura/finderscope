@@ -103,6 +103,51 @@ test("do: does not target work reached only through finderscope's injected prelo
   );
 });
 
+function chainOfFrames(frames: { functionName: string; url: string }[]): unknown {
+  const nodes = frames.map((frame, id) => ({
+    id,
+    callFrame: { functionName: frame.functionName, url: frame.url, lineNumber: 0, columnNumber: 0 },
+    children: id + 1 < frames.length ? [id + 1] : [],
+  }));
+  const leafId = frames.length - 1;
+  return { nodes, samples: [leafId, leafId], timeDeltas: [0, 100, 100] };
+}
+
+test("a dynamic import() from an own function is module loading, not a fix candidate", () => {
+  const json = chainOfFrames([
+    { functionName: "(root)", url: "" },
+    { functionName: "start", url: "file:///project/src/main.mjs" },
+    { functionName: "importModuleDynamicallyCallback", url: "node:internal/modules/esm/utils" },
+    { functionName: "compileSourceTextModule", url: "node:internal/modules/esm/utils" },
+  ]);
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
+  assert.deepEqual([...analysis.caused.keys()], []);
+  assert.deepEqual([...analysis.notCaused], [["module loading", 200]]);
+});
+
+test("a require() from an own function is module loading, and the required file's own top level stays a candidate", () => {
+  const loading = chainOfFrames([
+    { functionName: "(root)", url: "" },
+    { functionName: "start", url: "file:///project/src/main.cjs" },
+    { functionName: "require", url: "node:internal/modules/helpers" },
+    { functionName: "Module._load", url: "node:internal/modules/cjs/loader" },
+  ]);
+  const loadingAnalysis = analyzeCpuProfile(parseCpuProfile(loading), { root: "/project" });
+  assert.deepEqual([...loadingAnalysis.caused.keys()], []);
+  assert.deepEqual([...loadingAnalysis.notCaused], [["module loading", 200]]);
+
+  const evaluating = chainOfFrames([
+    { functionName: "(root)", url: "" },
+    { functionName: "start", url: "file:///project/src/main.cjs" },
+    { functionName: "require", url: "node:internal/modules/helpers" },
+    { functionName: "Module._load", url: "node:internal/modules/cjs/loader" },
+    { functionName: "", url: "file:///project/src/heavy.cjs" },
+  ]);
+  const evaluatingAnalysis = analyzeCpuProfile(parseCpuProfile(evaluating), { root: "/project" });
+  assert.deepEqual([...evaluatingAnalysis.caused.keys()], ["(anonymous) src/heavy.cjs:1:1"]);
+  assert.deepEqual([...evaluatingAnalysis.notCaused], []);
+});
+
 test("the breakdown line names an anonymous entry by file and line, and merges entries that print alike", () => {
   // run (own) calls three package functions: an anonymous one, and two distinct functions that
   // share the name "walk". Each gets two samples.
