@@ -79,6 +79,9 @@ export function buildTop(analysis: ProfileAnalysis, profilePath: string, options
   const share = (value: number): number => (total > 0 ? value / total : 0);
 
   let sortedEntries: TopEntry[];
+  // Loader work below an own import() or require() is module loading, so a leaf can have self time
+  // that no own function caused. Decided before --area, which can empty the list for its own reason.
+  let leafNotCaused = false;
   if (by === "caused") {
     sortedEntries = [...analysis.caused.values()].map((entry) => {
       let value = entry.value;
@@ -88,6 +91,7 @@ export function buildTop(analysis: ProfileAnalysis, profilePath: string, options
       }
       return { key: entry.key, area: "own", value, share: share(value) };
     }).sort((a, b) => b.value - a.value || a.key.localeCompare(b.key));
+    leafNotCaused = options.leaf !== undefined && sortedEntries.every((entry) => entry.value === 0) && (analysis.functions.get(options.leaf)?.self ?? 0) > 0;
     if (options.area !== undefined) sortedEntries = sortedEntries.filter((entry) => entry.area === options.area);
   } else if (by === "root") {
     // Already sorted by value, descending (buildTopDown's own rootTotals sort) - re-sorted here
@@ -127,19 +131,16 @@ export function buildTop(analysis: ProfileAnalysis, profilePath: string, options
     total,
     entries,
     cut: Math.max(0, nonZeroEntries.length - n),
-    do: chooseDo(nonZeroEntries, by, profilePath, windowArgs),
+    do: leafNotCaused ? `finderscope ${shQuote(profilePath)}${windowArgs}` : chooseDo(nonZeroEntries, by, profilePath, windowArgs),
   };
-  // A filter that matched nothing prints a bare header, which reads the same as a profile with no
-  // time in it. The summary's "not caused by your code" rows (module loading, gc, ...) look like
-  // areas and are not, so the note names the areas this profile actually has.
-  if (options.area !== undefined && entries.length === 0) {
+  if (leafNotCaused) {
+    data.note = `no own function caused this leaf's self time; it is under "not caused by your code" in the summary`;
+  } else if (options.area !== undefined && entries.length === 0) {
+    // A filter that matched nothing prints a bare header, which reads the same as a profile with no
+    // time in it. The summary's "not caused by your code" rows (module loading, gc, ...) look like
+    // areas and are not, so the note names the areas this profile actually has.
     const areas = [...new Set([...analysis.functions.values()].filter((f) => f.total > 0).map((f) => f.area))].sort();
     data.note = `no function with time in area "${options.area}"; the areas in this profile are: ${areas.join(", ")}`;
-  }
-  // Loader work below an own import() or require() is module loading, so its leaf can have self
-  // time that no own function caused, and the empty list would read as a leaf with no time at all.
-  if (options.leaf !== undefined && entries.length === 0 && (analysis.functions.get(options.leaf)?.self ?? 0) > 0) {
-    data.note = `no own function caused this leaf's self time; it is under "not caused by your code" in the summary`;
   }
   return data;
 }
