@@ -4,9 +4,10 @@
 // have no real file at all (native, wasm, eval, and the constructor-collision regression).
 import { test } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseCpuProfile } from "../src/profile/cpu.js";
 import { parseHeapProfile } from "../src/profile/heap.js";
 import { analyzeCpuProfile, analyzeHeapProfile } from "../src/model.js";
@@ -177,6 +178,30 @@ test("a package's top level run by a require() from an own function is module lo
   assert.deepEqual([...analysis.notCaused], [["module loading", 200]]);
 });
 
+test("a source-mapped package's top level run by a require() from an own function is module loading", () => {
+  const dir = mkdtempSync(join(tmpdir(), "finderscope-model-test-"));
+  try {
+    mkdirSync(join(dir, "node_modules", "heavy"), { recursive: true });
+    writeFileSync(join(dir, "node_modules", "heavy", "index.js"), '"use strict";\nexports.t = 1;\n//# sourceMappingURL=index.js.map\n');
+    writeFileSync(
+      join(dir, "node_modules", "heavy", "index.js.map"),
+      JSON.stringify({ version: 3, sources: ["src/index.ts"], names: [], mappings: "AAEA;AACA" }),
+    );
+    const json = chainOfFrames([
+      { functionName: "(root)", url: "" },
+      { functionName: "start", url: pathToFileURL(join(dir, "main.cjs")).href },
+      ...requireFirstLoad,
+      { functionName: "", url: pathToFileURL(join(dir, "node_modules", "heavy", "index.js")).href },
+    ]);
+    const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: dir });
+    assert.deepEqual([...analysis.functions.values()].filter((f) => f.area === "heavy").map((f) => f.key), ["(anonymous) heavy/src/index.ts:3:1"]);
+    assert.deepEqual([...analysis.caused.keys()], []);
+    assert.deepEqual([...analysis.notCaused], [["module loading", 200]]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a require() of an already loaded module in an own loop stays on the loop", () => {
   const json = chainOfFrames([
     { functionName: "(root)", url: "" },
@@ -222,6 +247,28 @@ test("top --leaf on loader work that no own function caused says where that time
 finderscope top --leaf '${leaf}' (by caused, total 0.2ms)
 
   note: no own function caused this leaf's self time; it is under "not caused by your code" in the summary
+
+do: finderscope 'p.cpuprofile'`,
+  );
+});
+
+test("top --leaf with an --area that matches no own function keeps the area note", () => {
+  const json = chainOfFrames([
+    { functionName: "(root)", url: "" },
+    { functionName: "hot", url: "file:///project/src/main.cjs" },
+    ...requireEntry,
+  ]);
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
+  const leaf = "(anonymous) node:internal/modules/cjs/loader:1181:1";
+  assert.deepEqual(buildTop(analysis, "p.cpuprofile", { leaf }).entries.map((e) => e.key), ["hot src/main.cjs:1:1"]);
+  const data = buildTop(analysis, "p.cpuprofile", { leaf, area: "node" });
+  assert.equal(
+    formatTopText(data, "p.cpuprofile"),
+    `profile: p.cpuprofile
+
+finderscope top --area node --leaf '${leaf}' (by caused, total 0.2ms)
+
+  note: no function with time in area "node"; the areas in this profile are: node, own, program
 
 do: finderscope top 'p.cpuprofile'`,
   );
