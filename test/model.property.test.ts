@@ -149,3 +149,55 @@ test(
   },
   20_000,
 );
+
+const LOADER_FRAMES = [
+  { functionName: "compileSourceTextModule", url: "node:internal/modules/esm/utils" },
+  { functionName: "getOrCreateModuleJob", url: "node:internal/modules/esm/loader" },
+  { functionName: "Module._load", url: "node:internal/modules/cjs/loader" },
+  { functionName: "readFileSync", url: "node:fs" },
+  { functionName: "decode", url: "node:internal/encoding" },
+  { functionName: "nativeFn", url: "" },
+];
+
+function chainProfile(frames: { functionName: string; url: string }[], sampledDepths: number[], timeDeltas: number[]): unknown {
+  const nodes = frames.map((frame, id) => ({
+    id,
+    callFrame: { functionName: frame.functionName, url: frame.url, lineNumber: 0, columnNumber: 0 },
+    children: id + 1 < frames.length ? [id + 1] : [],
+  }));
+  return { nodes, samples: sampledDepths, timeDeltas };
+}
+
+test(
+  "a module graph loaded through import() from own code reports the same module loading as a static import of it",
+  () => {
+    hegel.test((tc) => {
+      const loader = tc.draw(gs.arrays(gs.sampledFrom(LOADER_FRAMES), { minSize: 1, maxSize: 6 }));
+      const sampleCount = tc.draw(gs.integers({ minValue: 1, maxValue: 12 }));
+      const sampled = tc.draw(gs.arrays(gs.integers({ minValue: 0, maxValue: loader.length - 1 }), { minSize: sampleCount, maxSize: sampleCount }));
+      const timeDeltas = tc.draw(gs.arrays(gs.integers({ minValue: 0, maxValue: 500 }), { minSize: sampleCount, maxSize: sampleCount }));
+
+      const staticEntry = [
+        { functionName: "(root)", url: "" },
+        { functionName: "executeUserEntryPoint", url: "node:internal/modules/run_main" },
+      ];
+      const dynamicEntry = [
+        { functionName: "(root)", url: "" },
+        { functionName: "", url: "file:///project/src/main.mjs" },
+        { functionName: "start", url: "file:///project/src/main.mjs" },
+        { functionName: "importModuleDynamicallyCallback", url: "node:internal/modules/esm/utils" },
+      ];
+      const asStatic = analyzeCpuProfile(
+        parseCpuProfile(chainProfile([...staticEntry, ...loader], sampled.map((d) => d + staticEntry.length), timeDeltas)),
+        { root: "/project" },
+      );
+      const asDynamic = analyzeCpuProfile(
+        parseCpuProfile(chainProfile([...dynamicEntry, ...loader], sampled.map((d) => d + dynamicEntry.length), timeDeltas)),
+        { root: "/project" },
+      );
+      assert.deepEqual([...asDynamic.caused.keys()], []);
+      assert.deepEqual([...asDynamic.notCaused], [...asStatic.notCaused]);
+    }, { testCases: 200 });
+  },
+  20_000,
+);
