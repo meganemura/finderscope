@@ -50,7 +50,8 @@ file がもう存在しない場合は、一方の path がもう一方の path 
 小数第 3 位までに丸める（`0.973`）。完全な JSON shape は [docs/design.md](docs/design.md) にある。
 
 summary は、各 sample を stack 上で最も深い `own` frame に 1 回だけ割り当て、原因となった
-cost の順に function を表示する。各行は self time と、その function が直接呼び出した
+cost の順に function を表示する。own function が `import()` や `require()` で始めた loader の処理は、
+static import と同じく module loading に数える。各行は self time と、その function が直接呼び出した
 own ではない entry の上位 3 件を示す。各 entry は area、function 名、cost を持つ。
 より深い leaf は `callees` で確認する。`top` も同じ順位を既定値にする。`top --leaf <function>` は、指定した
 leaf の self time を発生させた own function を示す。以前の順位は `top --by self|total|root` で使える。

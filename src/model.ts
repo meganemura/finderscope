@@ -964,7 +964,7 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
 
     const ownIndexes = keys.flatMap((key, index) => infoForKeyArea(key, keyMeta) === "own" ? [index] : []);
     const deepestOwnIndex = ownIndexes.at(-1);
-    if (deepestOwnIndex === undefined) {
+    if (deepestOwnIndex === undefined || entersModuleLoader(keys[deepestOwnIndex + 1], keyMeta)) {
       const category = notCausedCategory(keys, keyMeta);
       notCaused.set(category, (notCaused.get(category) ?? 0) + contribution.value);
       continue;
@@ -1022,6 +1022,17 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
 
 function infoForKeyArea(key: string, keyMeta: Map<string, { area: string; name: string }>): string {
   return keyMeta.get(key)?.area ?? "unknown";
+}
+
+/**
+ * An own function that calls import() or require() hands the loader the same work a static import
+ * does at startup, where no own frame is on the stack. Ranking the caller would point at a call
+ * site instead of the module graph, and the profile does not record the specifier to name it.
+ * Only the entry frame decides: an own frame deeper in the loader, such as the imported module's
+ * own top level, stays the deepest own frame and keeps its cost.
+ */
+function entersModuleLoader(entryKey: string | undefined, keyMeta: Map<string, { area: string; name: string }>): boolean {
+  return entryKey !== undefined && infoForKeyArea(entryKey, keyMeta) === "node" && entryKey.includes(" node:internal/modules/");
 }
 
 function notCausedCategory(
