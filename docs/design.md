@@ -126,11 +126,17 @@ root question. `callees` shows where one own function hands off. `callers --path
   Real CLI profiles produced one dominant chain for the leading candidates. Multiple direct
   caller rows repeated the same entry frame and used more lines without changing the next source
   location. The bounded chain preserved the route and read better in the default report.
-- An own function that calls `import()` or `require()` does not cause the loader work below that
-  call. A sample whose first frame below its deepest own frame is in `node:internal/modules/`
-  counts as module loading, as it does under a static import, where no own frame is on the stack.
-  The profile does not record the specifier, so the caller row could only name the call site. An
-  own frame deeper in the loader, such as the imported module's top level, keeps its cost.
+- An own function whose `import()` or `require()` loads a module for the first time does not
+  cause that load. A sample counts as module loading, as it does under a static import, where no
+  own frame is on the stack, when the first frame below its deepest own frame is in
+  `node:internal/modules/` and the chain below reaches load work: `wrapSafe`, `loadSource`,
+  `loadESMFromCJS`, `loadAndTranslate`, `compileSourceTextModule`, or `ModuleJob` (the names Node
+  24 profiles show), or a package's top level (an anonymous frame at 1:1). The profile does not
+  record the specifier, so the caller row could only name the call site. A cached `require()` or
+  `import()`, `require.resolve()`, `import.meta.resolve()`, and `createRequire()` run other loader
+  frames only, and stay on the caller, because the own code that repeats them is what to change.
+  Resolution runs the same frames for a first load as for a cached one, so it stays on the caller
+  too. An own frame deeper in the loader, such as the imported module's top level, keeps its cost.
 - Work with no own frame groups into module loading, GC, idle, program, and other work. A profile
   with at least 80% idle folds to one line in `run`, while a direct profile query remains complete.
 - A function is printed as `name path:line:col`, with 1-based line and column. The same text works

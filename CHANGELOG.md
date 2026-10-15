@@ -7,17 +7,21 @@ may change commands, flags, or output shapes. The version entry will describe ea
 
 ### Fixed
 
-- Loader work below an own function's `import()` or `require()` counts as module loading, as it
-  does for a static import. The calling function no longer ranks as a fix candidate for it. An
-  own frame inside the loaded module, such as its top level, still ranks.
+- The first load of a module by an own function's `import()` or `require()` counts as module
+  loading, as it does for a static import. The calling function no longer ranks as a fix
+  candidate for it. An own frame inside the loaded module, such as its top level, still ranks. A
+  cached `require()` or `import()`, `require.resolve()`, `import.meta.resolve()`, and
+  `createRequire()` stay on the own function that calls them.
 
 ### Changed
 
 - `callers` on a function that no own frame reaches prints a `note:` (and a `note` JSON field)
   instead of an empty list, and its `do:` names `--direct`.
 - `top --area` that matches no function prints a `note:` listing the areas the profile has.
+- `top --leaf` on a leaf whose self time no own function caused prints a `note:` that says so.
 - When module loading is at least half of a CPU profile, the summary prints a `note:` that says so
-  and suggests a dynamic `import()`, and its `do:` names `top --by self`.
+  and suggests loading fewer modules, or loading a module only on the path that uses it, and its
+  `do:` names `top --by self`.
 - A version bump that lands on `main` now publishes the package. The publish workflow creates the
   `v<version>` tag and the GitHub release after `npm publish`; nobody pushes a release tag by hand.
 

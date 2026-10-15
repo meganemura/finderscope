@@ -964,7 +964,7 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
 
     const ownIndexes = keys.flatMap((key, index) => infoForKeyArea(key, keyMeta) === "own" ? [index] : []);
     const deepestOwnIndex = ownIndexes.at(-1);
-    if (deepestOwnIndex === undefined || entersModuleLoader(keys[deepestOwnIndex + 1], keyMeta)) {
+    if (deepestOwnIndex === undefined || loadsModule(keys.slice(deepestOwnIndex + 1), keyMeta)) {
       const category = notCausedCategory(keys, keyMeta);
       notCaused.set(category, (notCaused.get(category) ?? 0) + contribution.value);
       continue;
@@ -1025,14 +1025,30 @@ function infoForKeyArea(key: string, keyMeta: Map<string, { area: string; name: 
 }
 
 /**
- * An own function that calls import() or require() hands the loader the same work a static import
- * does at startup, where no own frame is on the stack. Ranking the caller would point at a call
- * site instead of the module graph, and the profile does not record the specifier to name it.
- * Only the entry frame decides: an own frame deeper in the loader, such as the imported module's
- * own top level, stays the deepest own frame and keeps its cost.
+ * Frames that run only while a module is read, compiled, linked, or evaluated for the first time,
+ * named as Node 24 profiles show them. A cached require(), a cached import(), require.resolve(),
+ * import.meta.resolve(), and createRequire() run the rest of node:internal/modules and none of
+ * these, and the own code that calls them in a loop is what to change.
  */
-function entersModuleLoader(entryKey: string | undefined, keyMeta: Map<string, { area: string; name: string }>): boolean {
-  return entryKey !== undefined && infoForKeyArea(entryKey, keyMeta) === "node" && entryKey.includes(" node:internal/modules/");
+const MODULE_LOAD_FRAMES = new Set(["wrapSafe", "loadSource", "loadESMFromCJS", "loadAndTranslate", "compileSourceTextModule", "ModuleJob"]);
+
+/**
+ * An own function that calls import() or require() for a module not yet loaded hands the loader
+ * the work a static import does at startup, where no own frame is on the stack, so that work is
+ * module loading too. The loaded module's own top level is the deepest own frame of its samples
+ * and keeps its cost. A package's top level is an anonymous frame at 1:1, where V8 places a
+ * module body. Resolution runs the same frames for a first load as for a cached one, so it
+ * stays on the caller.
+ */
+function loadsModule(below: string[], keyMeta: Map<string, { area: string; name: string }>): boolean {
+  const entry = below[0];
+  if (entry === undefined || infoForKeyArea(entry, keyMeta) !== "node" || !entry.includes(" node:internal/modules/")) return false;
+  return below.some((key) => {
+    const meta = keyMeta.get(key);
+    if (meta === undefined) return false;
+    if (meta.area === "node") return MODULE_LOAD_FRAMES.has(meta.name) && key.includes(" node:internal/modules/");
+    return meta.area !== "native" && meta.name === "(anonymous)" && key.endsWith(":1:1");
+  });
 }
 
 function notCausedCategory(
