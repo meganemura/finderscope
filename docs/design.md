@@ -116,7 +116,7 @@ root question. `callees` shows where one own function hands off. `callers --path
 `callees --paths` keep the complete folded path views. `top --by self` keeps the leaf-work ranking.
 
 - Each sample belongs to the deepest own frame on its root-to-leaf stack. This makes caused cost
-  exclusive: caused values plus the no-own value equal the profile total, and no sample appears
+  exclusive: caused values plus the not-caused value equal the profile total, and no sample appears
   in two rows. A function's caused cost cannot exceed its inclusive total.
 - A candidate row splits caused cost into self cost and non-own entry frames. An entry is the
   first non-own frame below the candidate. The report shows the three largest entries. Each entry
@@ -126,6 +126,11 @@ root question. `callees` shows where one own function hands off. `callers --path
   Real CLI profiles produced one dominant chain for the leading candidates. Multiple direct
   caller rows repeated the same entry frame and used more lines without changing the next source
   location. The bounded chain preserved the route and read better in the default report.
+- An own function that calls `import()` or `require()` does not cause the loader work below that
+  call. A sample whose first frame below its deepest own frame is in `node:internal/modules/`
+  counts as module loading, as it does under a static import, where no own frame is on the stack.
+  The profile does not record the specifier, so the caller row could only name the call site. An
+  own frame deeper in the loader, such as the imported module's top level, keeps its cost.
 - Work with no own frame groups into module loading, GC, idle, program, and other work. A profile
   with at least 80% idle folds to one line in `run`, while a direct profile query remains complete.
 - A function is printed as `name path:line:col`, with 1-based line and column. The same text works

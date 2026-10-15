@@ -5,6 +5,12 @@ may change commands, flags, or output shapes. The version entry will describe ea
 
 ## Unreleased
 
+### Fixed
+
+- Loader work below an own function's `import()` or `require()` counts as module loading, as it
+  does for a static import. The calling function no longer ranks as a fix candidate for it. An
+  own frame inside the loaded module, such as its top level, still ranks.
+
 ### Changed
 
 - `callers` on a function that no own frame reaches prints a `note:` (and a `note` JSON field)

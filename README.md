@@ -48,7 +48,8 @@ profile) that every value and total in it is measured in; every share is a 0..1 
 3 decimal places (`0.973`). See [docs/design.md](docs/design.md) for the full JSON shape.
 
 The summary ranks editable functions by caused cost. Each sample belongs to its deepest `own`
-frame. The row shows self time and the three largest non-own calls that the function made.
+frame. Loader work that an own function starts with `import()` or `require()` counts as module
+loading instead, the same as a static import. The row shows self time and the three largest non-own calls that the function made.
 Each call shows its area, function name, and cost. Use `callees` to inspect deeper leaf work.
 `top` uses the same ranking by default. `top --leaf <function>` answers which own functions caused
 the selected leaf's self time. `top --by self|total|root` keeps the earlier rankings available.
