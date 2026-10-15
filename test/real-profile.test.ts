@@ -6,7 +6,7 @@
 import { test } from "vitest";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -148,4 +148,44 @@ test("`lines` on a real profile of the tsc-compiled fixture maps its hot, indent
   } finally {
     rmSync(outDir, { recursive: true, force: true });
   }
+});
+
+function profileGenerated(files: Record<string, string>, entry: string): { causedBy: (name: string) => number; loading: number; total: number } {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), "finderscope-loader-")));
+  try {
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+    const { dir: profileDir, json } = profileScript(join(dir, entry), dir);
+    rmSync(profileDir, { recursive: true, force: true });
+    const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: dir });
+    return {
+      causedBy: (name) => [...analysis.caused.values()].filter((entry) => analysis.functions.get(entry.key)?.name === name).reduce((sum, entry) => sum + entry.value, 0),
+      loading: analysis.notCaused.get("module loading") ?? 0,
+      total: analysis.total,
+    };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("a real import() of a large module from an own function counts the load as module loading", () => {
+  const heavy = Array.from({ length: 4000 }, (_, i) => `export function f${i}(x) { let s = 0; for (let j = 0; j < x; j++) s += j * ${i}; return s; }`).join("\n");
+  const result = profileGenerated({
+    "heavy.mjs": heavy,
+    "main.mjs": 'async function start() { const m = await import("./heavy.mjs"); return m.f1(3); }\nawait start();\n',
+  }, "main.mjs");
+  assert.ok(result.loading > 4 * result.causedBy("start"), `module loading ${result.loading}us, start caused ${result.causedBy("start")}us`);
+});
+
+test("a real loop of require() calls for a module already loaded stays on the loop", () => {
+  const result = profileGenerated({
+    "main.cjs": 'function hot() { let n = 0; for (let i = 0; i < 1e5; i++) n += require("node:path").sep.length; return n; }\nhot();\n',
+  }, "main.cjs");
+  assert.ok(result.causedBy("hot") > result.total / 2, `hot caused ${result.causedBy("hot")}us of ${result.total}us`);
+});
+
+test("a real loop of require.resolve() calls stays on the loop", () => {
+  const result = profileGenerated({
+    "main.cjs": 'function start() { for (let i = 0; i < 3000; i++) { try { require.resolve("./missing" + i); } catch {} } }\nstart();\n',
+  }, "main.cjs");
+  assert.ok(result.causedBy("start") > result.total / 2, `start caused ${result.causedBy("start")}us of ${result.total}us`);
 });

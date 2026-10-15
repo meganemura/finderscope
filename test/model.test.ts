@@ -12,6 +12,7 @@ import { parseHeapProfile } from "../src/profile/heap.js";
 import { analyzeCpuProfile, analyzeHeapProfile } from "../src/model.js";
 import { resolveFunction } from "../src/query.js";
 import { buildSummary, formatSummaryText } from "../src/report/summary.js";
+import { buildTop, formatTopText } from "../src/report/top.js";
 
 /**
  * The last frame is sampled twice: with a single sample, the last-sample-gets-the-median rule
@@ -103,15 +104,32 @@ test("do: does not target work reached only through finderscope's injected prelo
   );
 });
 
-function chainOfFrames(frames: { functionName: string; url: string }[]): unknown {
+type Frame = { functionName: string; url: string; lineNumber?: number };
+
+function chainOfFrames(frames: Frame[]): unknown {
   const nodes = frames.map((frame, id) => ({
     id,
-    callFrame: { functionName: frame.functionName, url: frame.url, lineNumber: 0, columnNumber: 0 },
+    callFrame: { functionName: frame.functionName, url: frame.url, lineNumber: frame.lineNumber ?? 0, columnNumber: 0 },
     children: id + 1 < frames.length ? [id + 1] : [],
   }));
   const leafId = frames.length - 1;
   return { nodes, samples: [leafId, leafId], timeDeltas: [0, 100, 100] };
 }
+
+// Frame names and nesting below are copied from real `node --cpu-prof` profiles on Node 24.22.0.
+const CJS = "node:internal/modules/cjs/loader";
+const requireEntry: Frame[] = [
+  { functionName: "require", url: "node:internal/modules/helpers" },
+  { functionName: "", url: CJS, lineNumber: 1499 },
+  { functionName: "wrapModuleLoad", url: CJS },
+  { functionName: "", url: CJS, lineNumber: 1180 },
+];
+const requireFirstLoad: Frame[] = [
+  ...requireEntry,
+  { functionName: "", url: CJS, lineNumber: 1478 },
+  { functionName: "", url: CJS, lineNumber: 1797 },
+  { functionName: "", url: CJS, lineNumber: 1693 },
+];
 
 test("a dynamic import() from an own function is module loading, not a fix candidate", () => {
   const json = chainOfFrames([
@@ -126,26 +144,87 @@ test("a dynamic import() from an own function is module loading, not a fix candi
 });
 
 test("a require() from an own function is module loading, and the required file's own top level stays a candidate", () => {
-  const loading = chainOfFrames([
+  const compiling = chainOfFrames([
     { functionName: "(root)", url: "" },
     { functionName: "start", url: "file:///project/src/main.cjs" },
-    { functionName: "require", url: "node:internal/modules/helpers" },
-    { functionName: "Module._load", url: "node:internal/modules/cjs/loader" },
+    ...requireFirstLoad,
+    { functionName: "wrapSafe", url: CJS },
   ]);
-  const loadingAnalysis = analyzeCpuProfile(parseCpuProfile(loading), { root: "/project" });
-  assert.deepEqual([...loadingAnalysis.caused.keys()], []);
-  assert.deepEqual([...loadingAnalysis.notCaused], [["module loading", 200]]);
+  const compilingAnalysis = analyzeCpuProfile(parseCpuProfile(compiling), { root: "/project" });
+  assert.deepEqual([...compilingAnalysis.caused.keys()], []);
+  assert.deepEqual([...compilingAnalysis.notCaused], [["module loading", 200]]);
 
   const evaluating = chainOfFrames([
     { functionName: "(root)", url: "" },
     { functionName: "start", url: "file:///project/src/main.cjs" },
-    { functionName: "require", url: "node:internal/modules/helpers" },
-    { functionName: "Module._load", url: "node:internal/modules/cjs/loader" },
+    ...requireFirstLoad,
     { functionName: "", url: "file:///project/src/heavy.cjs" },
   ]);
   const evaluatingAnalysis = analyzeCpuProfile(parseCpuProfile(evaluating), { root: "/project" });
   assert.deepEqual([...evaluatingAnalysis.caused.keys()], ["(anonymous) src/heavy.cjs:1:1"]);
   assert.deepEqual([...evaluatingAnalysis.notCaused], []);
+});
+
+test("a package's top level run by a require() from an own function is module loading", () => {
+  const json = chainOfFrames([
+    { functionName: "(root)", url: "" },
+    { functionName: "start", url: "file:///project/src/main.cjs" },
+    ...requireFirstLoad,
+    { functionName: "", url: "file:///project/node_modules/heavy/index.js" },
+  ]);
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
+  assert.deepEqual([...analysis.caused.keys()], []);
+  assert.deepEqual([...analysis.notCaused], [["module loading", 200]]);
+});
+
+test("a require() of an already loaded module in an own loop stays on the loop", () => {
+  const json = chainOfFrames([
+    { functionName: "(root)", url: "" },
+    { functionName: "hot", url: "file:///project/src/main.cjs" },
+    ...requireEntry,
+  ]);
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
+  assert.deepEqual([...analysis.caused.keys()], ["hot src/main.cjs:1:1"]);
+  assert.deepEqual([...analysis.notCaused], []);
+});
+
+test("require.resolve() in an own loop stays on the loop", () => {
+  const json = chainOfFrames([
+    { functionName: "(root)", url: "" },
+    { functionName: "start", url: "file:///project/src/main.cjs" },
+    { functionName: "resolve", url: "node:internal/modules/helpers" },
+    { functionName: "resolveForCJSWithHooks", url: CJS },
+    { functionName: "wrapResolveFilename", url: CJS },
+    { functionName: "", url: CJS, lineNumber: 1400 },
+    { functionName: "", url: CJS, lineNumber: 700 },
+    { functionName: "stat", url: CJS },
+    { functionName: "internalModuleStat", url: "" },
+  ]);
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
+  assert.deepEqual([...analysis.caused.keys()], ["start src/main.cjs:1:1"]);
+  assert.deepEqual([...analysis.notCaused], []);
+});
+
+test("top --leaf on loader work that no own function caused says where that time went", () => {
+  const json = chainOfFrames([
+    { functionName: "(root)", url: "" },
+    { functionName: "start", url: "file:///project/src/main.mjs" },
+    { functionName: "importModuleDynamicallyCallback", url: "node:internal/modules/esm/utils" },
+    { functionName: "compileSourceTextModule", url: "node:internal/modules/esm/utils" },
+  ]);
+  const analysis = analyzeCpuProfile(parseCpuProfile(json), { root: "/project" });
+  const leaf = "compileSourceTextModule node:internal/modules/esm/utils:1:1";
+  const data = buildTop(analysis, "p.cpuprofile", { leaf });
+  assert.equal(
+    formatTopText(data, "p.cpuprofile"),
+    `profile: p.cpuprofile
+
+finderscope top --leaf '${leaf}' (by caused, total 0.2ms)
+
+  note: no own function caused this leaf's self time; it is under "not caused by your code" in the summary
+
+do: finderscope top 'p.cpuprofile'`,
+  );
 });
 
 test("the breakdown line names an anonymous entry by file and line, and merges entries that print alike", () => {

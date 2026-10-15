@@ -150,54 +150,76 @@ test(
   20_000,
 );
 
-const LOADER_FRAMES = [
-  { functionName: "compileSourceTextModule", url: "node:internal/modules/esm/utils" },
-  { functionName: "getOrCreateModuleJob", url: "node:internal/modules/esm/loader" },
-  { functionName: "Module._load", url: "node:internal/modules/cjs/loader" },
-  { functionName: "readFileSync", url: "node:fs" },
-  { functionName: "decode", url: "node:internal/encoding" },
-  { functionName: "nativeFn", url: "" },
+type LoaderFrame = { functionName: string; url: string; lineNumber: number; loads: boolean };
+
+// Names and urls seen in real `node --cpu-prof` profiles on Node 24.22.0. A frame with `loads`
+// runs only while a module is read, compiled, linked, or evaluated for the first time. The others
+// also run for a cached require(), a cached import(), require.resolve(), or import.meta.resolve().
+const LOADER_FRAMES: LoaderFrame[] = [
+  { functionName: "wrapSafe", url: "node:internal/modules/cjs/loader", lineNumber: 1693, loads: true },
+  { functionName: "loadSource", url: "node:internal/modules/cjs/loader", lineNumber: 1100, loads: true },
+  { functionName: "loadESMFromCJS", url: "node:internal/modules/cjs/loader", lineNumber: 1500, loads: true },
+  { functionName: "loadAndTranslate", url: "node:internal/modules/esm/loader", lineNumber: 500, loads: true },
+  { functionName: "compileSourceTextModule", url: "node:internal/modules/esm/utils", lineNumber: 340, loads: true },
+  { functionName: "ModuleJob", url: "node:internal/modules/esm/module_job", lineNumber: 120, loads: true },
+  { functionName: "", url: "file:///project/node_modules/pkg/index.js", lineNumber: 0, loads: true },
+  { functionName: "getOrCreateModuleJob", url: "node:internal/modules/esm/loader", lineNumber: 600, loads: false },
+  { functionName: "resolveSync", url: "node:internal/modules/esm/loader", lineNumber: 760, loads: false },
+  { functionName: "wrapModuleLoad", url: "node:internal/modules/cjs/loader", lineNumber: 230, loads: false },
+  { functionName: "", url: "node:internal/modules/cjs/loader", lineNumber: 1180, loads: false },
+  { functionName: "resolveForCJSWithHooks", url: "node:internal/modules/cjs/loader", lineNumber: 1380, loads: false },
+  { functionName: "stat", url: "node:internal/modules/cjs/loader", lineNumber: 250, loads: false },
+  { functionName: "readFileSync", url: "node:fs", lineNumber: 430, loads: false },
+  { functionName: "internalModuleStat", url: "", lineNumber: 0, loads: false },
+  { functionName: "parse", url: "file:///project/node_modules/pkg/index.js", lineNumber: 40, loads: false },
 ];
 
-function chainProfile(frames: { functionName: string; url: string }[], sampledDepths: number[], timeDeltas: number[]): unknown {
-  const nodes = frames.map((frame, id) => ({
-    id,
-    callFrame: { functionName: frame.functionName, url: frame.url, lineNumber: 0, columnNumber: 0 },
-    children: id + 1 < frames.length ? [id + 1] : [],
-  }));
-  return { nodes, samples: sampledDepths, timeDeltas };
-}
+const ENTRIES = [
+  { functionName: "importModuleDynamicallyCallback", url: "node:internal/modules/esm/utils", lineNumber: 200, loads: false },
+  { functionName: "require", url: "node:internal/modules/helpers", lineNumber: 130, loads: false },
+  { functionName: "resolve", url: "node:internal/modules/helpers", lineNumber: 140, loads: false },
+];
+
+const START = { functionName: "start", url: "file:///project/src/main.mjs", lineNumber: 0, loads: false };
+const IMPORTED_TOP_LEVEL = { functionName: "", url: "file:///project/src/heavy.mjs", lineNumber: 0, loads: false };
+const OWN_KEYS = new Map([[START.url, "start src/main.mjs:1:1"], [IMPORTED_TOP_LEVEL.url, "(anonymous) src/heavy.mjs:1:1"]]);
 
 test(
-  "a module graph loaded through import() from own code reports the same module loading as a static import of it",
+  "loader work below an own import() or require() is module loading only when a module loads; the rest stays on the nearest own frame",
   () => {
     hegel.test((tc) => {
-      const loader = tc.draw(gs.arrays(gs.sampledFrom(LOADER_FRAMES), { minSize: 1, maxSize: 6 }));
-      const sampleCount = tc.draw(gs.integers({ minValue: 1, maxValue: 12 }));
-      const sampled = tc.draw(gs.arrays(gs.integers({ minValue: 0, maxValue: loader.length - 1 }), { minSize: sampleCount, maxSize: sampleCount }));
+      const pool = [...LOADER_FRAMES, IMPORTED_TOP_LEVEL];
+      const below = tc.draw(gs.arrays(gs.sampledFrom(pool), { minSize: 1, maxSize: 7 }));
+      const frames = [{ functionName: "(root)", url: "", lineNumber: 0, loads: false }, START, tc.draw(gs.sampledFrom(ENTRIES)), ...below];
+      const sampleCount = tc.draw(gs.integers({ minValue: 2, maxValue: 12 }));
+      const sampled = tc.draw(gs.arrays(gs.integers({ minValue: 1, maxValue: frames.length - 1 }), { minSize: sampleCount, maxSize: sampleCount }));
       const timeDeltas = tc.draw(gs.arrays(gs.integers({ minValue: 0, maxValue: 500 }), { minSize: sampleCount, maxSize: sampleCount }));
+      const nodes = frames.map((frame, id) => ({
+        id,
+        callFrame: { functionName: frame.functionName, url: frame.url, lineNumber: frame.lineNumber, columnNumber: 0 },
+        children: id + 1 < frames.length ? [id + 1] : [],
+      }));
+      const profile = parseCpuProfile({ nodes, samples: sampled, timeDeltas });
+      const analysis = analyzeCpuProfile(profile, { root: "/project" });
 
-      const staticEntry = [
-        { functionName: "(root)", url: "" },
-        { functionName: "executeUserEntryPoint", url: "node:internal/modules/run_main" },
-      ];
-      const dynamicEntry = [
-        { functionName: "(root)", url: "" },
-        { functionName: "", url: "file:///project/src/main.mjs" },
-        { functionName: "start", url: "file:///project/src/main.mjs" },
-        { functionName: "importModuleDynamicallyCallback", url: "node:internal/modules/esm/utils" },
-      ];
-      const asStatic = analyzeCpuProfile(
-        parseCpuProfile(chainProfile([...staticEntry, ...loader], sampled.map((d) => d + staticEntry.length), timeDeltas)),
-        { root: "/project" },
-      );
-      const asDynamic = analyzeCpuProfile(
-        parseCpuProfile(chainProfile([...dynamicEntry, ...loader], sampled.map((d) => d + dynamicEntry.length), timeDeltas)),
-        { root: "/project" },
-      );
-      assert.deepEqual([...asDynamic.caused.keys()], []);
-      assert.deepEqual([...asDynamic.notCaused], [...asStatic.notCaused]);
-    }, { testCases: 200 });
+      const expectedCaused = new Map<string, number>();
+      let expectedLoading = 0;
+      profile.samples.forEach((depth, i) => {
+        const time = profile.sampleTimes[i]!;
+        if (time <= 0) return;
+        const stack = frames.slice(0, depth + 1);
+        const ownDepth = stack.findLastIndex((frame) => OWN_KEYS.has(frame.url));
+        const rest = stack.slice(ownDepth + 1);
+        if (rest[0]?.url.startsWith("node:internal/modules/") && rest.some((frame) => frame.loads)) {
+          expectedLoading += time;
+        } else {
+          const key = OWN_KEYS.get(stack[ownDepth]!.url)!;
+          expectedCaused.set(key, (expectedCaused.get(key) ?? 0) + time);
+        }
+      });
+      assert.deepEqual(new Map([...analysis.caused].map(([key, entry]) => [key, entry.value])), expectedCaused);
+      assert.deepEqual(analysis.notCaused, expectedLoading > 0 ? new Map([["module loading", expectedLoading]]) : new Map());
+    }, { testCases: 300 });
   },
   20_000,
 );
