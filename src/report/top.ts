@@ -35,6 +35,8 @@ export interface TopData {
   total: number;
   entries: TopEntry[];
   cut: number;
+  /** Present only when an --area filter matched nothing. */
+  note?: string;
   /** The next command to run, without the leading "do: ". */
   do: string;
 }
@@ -116,7 +118,7 @@ export function buildTop(analysis: ProfileAnalysis, profilePath: string, options
   const nonZeroEntries = sortedEntries.filter((e) => e.value > 0);
   const entries = nonZeroEntries.slice(0, n).map((e) => ({ ...e, share: roundShare(e.share) }));
 
-  return {
+  const data: TopData = {
     metric: analysis.metric,
     unit: metricUnit(analysis.metric),
     by,
@@ -127,6 +129,14 @@ export function buildTop(analysis: ProfileAnalysis, profilePath: string, options
     cut: Math.max(0, nonZeroEntries.length - n),
     do: chooseDo(nonZeroEntries, by, profilePath, windowArgs),
   };
+  // A filter that matched nothing prints a bare header, which reads the same as a profile with no
+  // time in it. The summary's "not caused by your code" rows (module loading, gc, ...) look like
+  // areas and are not, so the note names the areas this profile actually has.
+  if (options.area !== undefined && entries.length === 0) {
+    const areas = [...new Set([...analysis.functions.values()].filter((f) => f.total > 0).map((f) => f.area))].sort();
+    data.note = `no function with time in area "${options.area}"; the areas in this profile are: ${areas.join(", ")}`;
+  }
+  return data;
 }
 
 export function formatTopText(data: TopData, profilePath: string, windowArgs = ""): string {
@@ -145,6 +155,7 @@ export function formatTopText(data: TopData, profilePath: string, windowArgs = "
     const shown = data.entries.length + data.cut;
     lines.push(`  … ${data.cut} more (finderscope top ${shQuote(profilePath)}${areaSuffix}${leafSuffix} --by ${data.by} -n ${shown}${windowArgs})`);
   }
+  if (data.note !== undefined) lines.push(`  note: ${data.note}`);
   lines.push("");
   lines.push(`do: ${data.do}`);
   return lines.join("\n");

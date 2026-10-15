@@ -52,6 +52,9 @@ frame. The row shows self time and the three largest non-own calls that the func
 Each call shows its area, function name, and cost. Use `callees` to inspect deeper leaf work.
 `top` uses the same ranking by default. `top --leaf <function>` answers which own functions caused
 the selected leaf's self time. `top --by self|total|root` keeps the earlier rankings available.
+When module loading is at least half of a CPU profile, the summary says so in a `note:` and its
+`do:` names `top --by self`. A `top --area` that matches no function lists the areas the profile
+has.
 
 `callees` and `callers --direct` print trees merged by function key. The default depth is two.
 A hot function often has hundreds of sample paths. Many paths differ only in package depth.
@@ -59,7 +62,8 @@ For a non-own target, plain `callers` groups paths by the nearest own frame. It 
 of collapsed frames. A non-own subtree becomes one area and entry-frame line. `--expand` opens
 package internals. The function's self time uses a `(self)` row. `--paths` keeps the older flat
 list available. A depth limit reports the hidden value and frame count. It also names the command
-that expands the node.
+that expands the node. When no own frame is on any path to the target, `callers` prints a `note:`
+and its `do:` names `--direct`.
 
 `lines` also lists the selected function's direct callees. It reports the source lines where each
 callee name appears as a call expression. These lines are text matches, not measured call sites.

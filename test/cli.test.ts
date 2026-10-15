@@ -23,6 +23,8 @@ const DEEP_ROOT_FIXTURE = "test/fixtures/deep-root.cpuprofile";
 // One own function ("main") with a real positionTicks array - test/lines.test.ts covers `lines`'s
 // exact text/JSON in full; this file only needs its do:/note: lines fed into allOutputs below.
 const LINES_FIXTURE = "test/fixtures/lines.cpuprofile";
+// Three of four samples under node:internal/modules (one in a dependency it loads), one in own code.
+const LOADING_FIXTURE = "test/fixtures/loading.cpuprofile";
 const ROOT = ["--root", "/project"];
 
 // Every stdout write from every capture() in this file lands here too, so one final test (at the
@@ -548,6 +550,77 @@ describe("--from/--to windowing", () => {
 // one of these strings is a command an agent is expected to copy and run as-is, so each must both
 // parse under `sh` and actually be runnable: no unresolved "<profile>"/"<function>" placeholder
 // left in place of a real value the command already had in hand.
+describe("a dead end names the next command", () => {
+  test("callers on a function no own frame reaches says so and points at --direct", async () => {
+    const { io, out } = capture();
+    const code = await main(["callers", CPU_FIXTURE, "(idle)", ...ROOT], io);
+    assert.equal(code, 0);
+    assert.equal(
+      out.join(""),
+      `profile: ${CPU_FIXTURE}
+
+finderscope callers "(idle)" (total 0.9ms)
+
+  note: no own function is on any path to it, so there is no caller of yours to group by; --direct shows the frames that call it
+
+do: finderscope callers '${CPU_FIXTURE}' '(idle)' --direct
+`,
+    );
+  });
+
+  test("callers --json carries the same note", async () => {
+    const { io, out } = capture();
+    await main(["callers", CPU_FIXTURE, "(idle)", ...ROOT, "--json"], io);
+    const data = JSON.parse(out.join(""));
+    assert.deepEqual(data.callers, []);
+    assert.match(data.note, /^no own function is on any path to it/);
+    assert.equal(data.do, `finderscope callers '${CPU_FIXTURE}' '(idle)' --direct`);
+  });
+
+  test("callers with an own caller has no note", async () => {
+    const { io, out } = capture();
+    await main(["callers", CPU_FIXTURE, "helper", ...ROOT, "--json"], io);
+    assert.equal(JSON.parse(out.join("")).note, undefined);
+  });
+
+  test("top --area that matches nothing lists the areas the profile has", async () => {
+    const { io, out } = capture();
+    const code = await main(["top", CPU_FIXTURE, ...ROOT, "--area", "module loading"], io);
+    assert.equal(code, 0);
+    assert.equal(
+      out.join(""),
+      `profile: ${CPU_FIXTURE}
+
+finderscope top --area module loading (by caused, total 5.4ms)
+
+  note: no function with time in area "module loading"; the areas in this profile are: idle, lodash, own, program
+
+do: finderscope top '${CPU_FIXTURE}'
+`,
+    );
+  });
+
+  test("a summary that is mostly module loading says so and points at self time", async () => {
+    const { io, out } = capture();
+    const code = await main([LOADING_FIXTURE, ...ROOT, "--json"], io);
+    assert.equal(code, 0);
+    const data = JSON.parse(out.join(""));
+    assert.equal(
+      data.note,
+      "module loading is 75.0% of the run: the time goes to importing modules, not to running code; import a heavy module where it is used (a dynamic import()) so a path that does not need it skips the load",
+    );
+    assert.equal(data.do, `finderscope top '${LOADING_FIXTURE}' --by self`);
+  });
+
+  test("a summary with little module loading keeps its note and do: unchanged", async () => {
+    const { io, out } = capture();
+    await main([CPU_FIXTURE, ...ROOT, "--json"], io);
+    const data = JSON.parse(out.join(""));
+    assert.equal(data.note, undefined);
+    assert.match(data.do, /^finderscope lines /);
+  });
+});
+
 describe("every do: and \"… N more\" command this file produced parses and is runnable as-is", () => {
   test("sh -n -c reports no syntax error, and none of them still carries a <placeholder>", () => {
     assert.ok(allOutputs.length > 0, "allOutputs is empty - did the tests above run first?");

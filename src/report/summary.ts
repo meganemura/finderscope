@@ -89,9 +89,16 @@ export function buildSummary(
     .map(([area, value]) => ({ area, value, share: roundShare(analysis.total > 0 ? value / analysis.total : 0) }))
     .sort((a, b) => b.value - a.value);
   const first = rows[0];
-  const do_ = first === undefined
-    ? `finderscope top ${shQuote(profilePath)}${windowArgs}`
-    : `finderscope lines ${shQuote(profilePath)} ${shQuote(first.key)}${windowArgs}`;
+  // A run that is mostly importing has no fix candidate worth reading: the time is in the module
+  // loader, which a CPU profile cannot split by file. Self time names the loader frames and the
+  // packages whose own code ran, which is what decides what to load later.
+  const loading = analysis.notCaused.get("module loading") ?? 0;
+  const mostlyLoading = analysis.metric !== "bytes" && analysis.total > 0 && loading / analysis.total >= 0.5;
+  const do_ = mostlyLoading
+    ? `finderscope top ${shQuote(profilePath)} --by self${windowArgs}`
+    : first === undefined
+      ? `finderscope top ${shQuote(profilePath)}${windowArgs}`
+      : `finderscope lines ${shQuote(profilePath)} ${shQuote(first.key)}${windowArgs}`;
   return {
     metric: analysis.metric,
     unit: metricUnit(analysis.metric),
@@ -102,7 +109,11 @@ export function buildSummary(
     fixCandidates: rows.slice(0, 8),
     fixCandidatesCut: Math.max(0, rows.length - 8),
     notCaused,
-    note: analysis.metric === "bytes" ? "the total is memory still live when the process exited, not the peak" : undefined,
+    note: analysis.metric === "bytes"
+      ? "the total is memory still live when the process exited, not the peak"
+      : mostlyLoading
+        ? `module loading is ${formatPercent(roundShare(loading / analysis.total))} of the run: the time goes to importing modules, not to running code; import a heavy module where it is used (a dynamic import()) so a path that does not need it skips the load`
+        : undefined,
     do: do_,
   };
 }

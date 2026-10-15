@@ -54,6 +54,8 @@ cost の順に function を表示する。各行は self time と、その funct
 own ではない entry の上位 3 件を示す。各 entry は area、function 名、cost を持つ。
 より深い leaf は `callees` で確認する。`top` も同じ順位を既定値にする。`top --leaf <function>` は、指定した
 leaf の self time を発生させた own function を示す。以前の順位は `top --by self|total|root` で使える。
+CPU profile の半分以上が module loading の場合、summary は `note:` でそれを示し、`do:` は `top --by self` を示す。
+`top --area` に一致する function がない場合は、その profile にある area を列挙する。
 
 `callers --direct` と `callees` は、function key ごとにまとめた直接の caller または callee を tree で
 表示する。既定の深さは 2 である。sample path ごとの行は表示しない。hot function の時間は、
@@ -62,6 +64,7 @@ leaf の self time を発生させた own function を示す。以前の順位�
 own frame ごとに path をまとめ、間にある frame 数を表示する。`own` ではない subtree は、area、最初の frame、total time を
 1 行にまとめる。`--expand` は package 内部も展開する。function 自身の self time は `(self)`
 行になる。以前の path ごとの一覧は `--paths` で表示できる。
+対象までのどの path にも own frame がない場合、`callers` は `note:` を表示し、`do:` は `--direct` を示す。
 深さの上限で止まった node は、表示しなかった value と frame 数を示し、その node を展開する command を表示する。
 
 `lines` は、選択した function の直接の callee も表示する。

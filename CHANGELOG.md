@@ -3,6 +3,16 @@
 The format follows Keep a Changelog, and the versions follow SemVer. Before 1.0, a minor version
 may change commands, flags, or output shapes. The version entry will describe each change.
 
+## Unreleased
+
+### Changed
+
+- `callers` on a function that no own frame reaches prints a `note:` (and a `note` JSON field)
+  instead of an empty list, and its `do:` names `--direct`.
+- `top --area` that matches no function prints a `note:` listing the areas the profile has.
+- When module loading is at least half of a CPU profile, the summary prints a `note:` that says so
+  and suggests a dynamic `import()`, and its `do:` names `top --by self`.
+
 ## 0.3.0 (2026-10-01)
 
 ### Fixed

@@ -21,6 +21,8 @@ export interface OwnCallerData {
   total: number;
   callers: { key: string; value: number; share: number; framesBetween: number }[];
   cut: number;
+  /** Present only when no own function is on any path to the target. */
+  note?: string;
   do: string;
 }
 
@@ -56,7 +58,7 @@ export function buildOwnCallers(
     .sort((a, b) => b.value - a.value || a.key.localeCompare(b.key));
   const shown = all.slice(0, n).map((row) => ({ ...row, share: roundShare(fn.total > 0 ? row.value / fn.total : 0) }));
   const first = shown[0];
-  return {
+  const data: OwnCallerData = {
     metric: analysis.metric,
     unit: metricUnit(analysis.metric),
     function: fn.key,
@@ -67,6 +69,14 @@ export function buildOwnCallers(
       ? `finderscope top ${shQuote(profilePath)}${windowArgs}`
       : `finderscope callees ${shQuote(profilePath)} ${shQuote(first.key)}${windowArgs}`,
   };
+  // An empty list reads like a function nobody called. When the time is real but no own frame
+  // sits above it (the module loader, a timer, a native callback), the frames that do call it are
+  // one flag away.
+  if (first === undefined && fn.total > 0) {
+    data.note = "no own function is on any path to it, so there is no caller of yours to group by; --direct shows the frames that call it";
+    data.do = `finderscope callers ${shQuote(profilePath)} ${shQuote(fn.key)} --direct${windowArgs}`;
+  }
+  return data;
 }
 
 export function formatOwnCallersText(data: OwnCallerData, profilePath: string, windowArgs = ""): string {
@@ -79,6 +89,7 @@ export function formatOwnCallersText(data: OwnCallerData, profilePath: string, w
     const count = data.callers.length + data.cut;
     lines.push(`  … ${data.cut} more (finderscope callers ${shQuote(profilePath)} ${shQuote(data.function)} -n ${count}${windowArgs})`);
   }
+  if (data.note !== undefined) lines.push(`  note: ${data.note}`);
   lines.push("", `do: ${data.do}`);
   return lines.join("\n");
 }
