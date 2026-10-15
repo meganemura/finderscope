@@ -48,11 +48,13 @@ profile) that every value and total in it is measured in; every share is a 0..1 
 3 decimal places (`0.973`). See [docs/design.md](docs/design.md) for the full JSON shape.
 
 The summary ranks editable functions by caused cost. Each sample belongs to its deepest `own`
-frame. Loader work that an own function starts with `import()` or `require()` counts as module
-loading instead, the same as a static import. The row shows self time and the three largest non-own calls that the function made.
-Each call shows its area, function name, and cost. Use `callees` to inspect deeper leaf work.
-`top` uses the same ranking by default. `top --leaf <function>` answers which own functions caused
-the selected leaf's self time. `top --by self|total|root` keeps the earlier rankings available.
+frame. When an own function's `import()` or `require()` loads a module for the first time, the
+read, compile, and package top-level work counts as module loading instead, the same as a static
+import. A cached `require()` or a `require.resolve()` stays on the caller. The row shows self time
+and the three largest non-own calls that the function made. Each call shows its area, function
+name, and cost. Use `callees` to inspect deeper leaf work. `top` uses the same ranking by default.
+`top --leaf <function>` answers which own functions caused the selected leaf's self time, and says
+so in a `note:` when none did. `top --by self|total|root` keeps the earlier rankings available.
 When module loading is at least half of a CPU profile, the summary says so in a `note:` and its
 `do:` names `top --by self`. A `top --area` that matches no function lists the areas the profile
 has.

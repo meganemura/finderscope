@@ -112,7 +112,7 @@ export function buildSummary(
     note: analysis.metric === "bytes"
       ? "the total is memory still live when the process exited, not the peak"
       : mostlyLoading
-        ? `module loading is ${formatPercent(roundShare(loading / analysis.total))} of the run: the time goes to importing modules, not to running code; import a heavy module where it is used (a dynamic import()) so a path that does not need it skips the load`
+        ? `module loading is ${formatPercent(roundShare(loading / analysis.total))} of the run: the time goes to loading modules, not to running code; load fewer or smaller modules on this path, or load a module only on the path that uses it`
         : undefined,
     do: do_,
   };

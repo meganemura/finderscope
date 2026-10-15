@@ -35,7 +35,7 @@ export interface TopData {
   total: number;
   entries: TopEntry[];
   cut: number;
-  /** Present only when an --area filter matched nothing. */
+  /** Present only when an --area filter matched nothing, or no own function caused the --leaf's self time. */
   note?: string;
   /** The next command to run, without the leading "do: ". */
   do: string;
@@ -135,6 +135,11 @@ export function buildTop(analysis: ProfileAnalysis, profilePath: string, options
   if (options.area !== undefined && entries.length === 0) {
     const areas = [...new Set([...analysis.functions.values()].filter((f) => f.total > 0).map((f) => f.area))].sort();
     data.note = `no function with time in area "${options.area}"; the areas in this profile are: ${areas.join(", ")}`;
+  }
+  // Loader work below an own import() or require() is module loading, so its leaf can have self
+  // time that no own function caused, and the empty list would read as a leaf with no time at all.
+  if (options.leaf !== undefined && entries.length === 0 && (analysis.functions.get(options.leaf)?.self ?? 0) > 0) {
+    data.note = `no own function caused this leaf's self time; it is under "not caused by your code" in the summary`;
   }
   return data;
 }
