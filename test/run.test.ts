@@ -136,8 +136,20 @@ test("noProfileWarning's no-signal case asks whether the command even ran node",
 // --heap-peak only adds --heapsnapshot-near-heap-limit when the command ALSO caps the heap
 // (--max-old-space-size) - otherwise V8 never approaches a limit at all, so the flag would sit
 // there and do nothing; that is reported as a note, not silently ignored.
+// An inherited NODE_OPTIONS cap counts as a cap, so a test of the uncapped
+// case runs without one, whatever the machine sets.
+async function withoutNodeOptions<T>(body: () => Promise<T>): Promise<T> {
+  const previous = process.env["NODE_OPTIONS"];
+  delete process.env["NODE_OPTIONS"];
+  try {
+    return await body();
+  } finally {
+    if (previous !== undefined) process.env["NODE_OPTIONS"] = previous;
+  }
+}
+
 test("--heap-peak with no heap cap reports a note and writes no snapshot", async () => {
-  const result = await runCommand({ heap: false, heapPeak: true, command: [process.execPath, "-e", "1"] });
+  const result = await withoutNodeOptions(() => runCommand({ heap: false, heapPeak: true, command: [process.execPath, "-e", "1"] }));
   assert.deepEqual(result.heapSnapshots, []);
   assert.match(result.heapPeakNote ?? "", /had no --max-old-space-size/);
 });
@@ -156,7 +168,7 @@ test("without --heap-peak, no note and no snapshot regardless of a heap cap", as
 
 test("cli.ts's run --json carries heapSnapshots and, when relevant, heapPeakNote", async () => {
   const { io, out } = capture();
-  const code = await main(["run", "--json", "--heap-peak", "--", process.execPath, "-e", "1"], io);
+  const code = await withoutNodeOptions(() => main(["run", "--json", "--heap-peak", "--", process.execPath, "-e", "1"], io));
   assert.equal(code, 0);
   const data = JSON.parse(out.join(""));
   assert.ok(Array.isArray(data.heapSnapshots));
