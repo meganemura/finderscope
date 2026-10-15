@@ -20,7 +20,7 @@ Give both window flags together. They work with CPU profiles.
 `finderscope top '<profile>' [--by caused|self|total|root] [--leaf function] [--area area] [--from ms --to ms] [-n N] [--json]`
 
 The default ranks own functions by caused cost. `--leaf` keeps only cost ending at one leaf.
-When no own function caused that leaf's self time, a `note:` says so.
+When no own function caused that leaf's self time, a `note:` says so and `do:` names the summary.
 `--by self` ranks direct work. `--by total` ranks inclusive work.
 `--by root` ranks the roots from `your code, top down`.
 `--area` selects one area, such as `own`, `node`, or a package name.

@@ -131,8 +131,13 @@ root question. `callees` shows where one own function hands off. `callers --path
   own frame is on the stack, when the first frame below its deepest own frame is in
   `node:internal/modules/` and the chain below reaches load work: `wrapSafe`, `loadSource`,
   `loadESMFromCJS`, `loadAndTranslate`, `compileSourceTextModule`, or `ModuleJob` (the names Node
-  24 profiles show), or a package's top level (an anonymous frame at 1:1). The profile does not
-  record the specifier, so the caller row could only name the call site. A cached `require()` or
+  24 profiles show), or a package's top level (an anonymous frame at line 0, column 0 of the
+  generated script, read before source mapping). The profile does not record the specifier, so
+  the caller row could only name the call site. Some first-load work runs none of these frames and
+  stays on the caller: a first `require()` of a JSON file, the first load of a Node built-in such
+  as `node:http` (`compileForInternalLoader` in `node:internal/bootstrap/realm`), and the file
+  read on Node 22, which has no `loadSource` frame. Node 22 also compiles a dynamic `import()`
+  after the calling function returns, so no own frame is above that work. A cached `require()` or
   `import()`, `require.resolve()`, `import.meta.resolve()`, and `createRequire()` run other loader
   frames only, and stay on the caller, because the own code that repeats them is what to change.
   Resolution runs the same frames for a first load as for a cached one, so it stays on the caller

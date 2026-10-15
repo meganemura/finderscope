@@ -48,9 +48,11 @@ profile) that every value and total in it is measured in; every share is a 0..1 
 3 decimal places (`0.973`). See [docs/design.md](docs/design.md) for the full JSON shape.
 
 The summary ranks editable functions by caused cost. Each sample belongs to its deepest `own`
-frame. When an own function's `import()` or `require()` loads a module for the first time, the
-read, compile, and package top-level work counts as module loading instead, the same as a static
-import. A cached `require()` or a `require.resolve()` stays on the caller. The row shows self time
+frame. When an own function's `import()` or `require()` loads a JavaScript file for the first
+time, the compile and the package top-level work count as module loading instead, the same as a
+static import. A cached `require()` or a `require.resolve()` stays on the caller. So do the
+resolution of a first load, a first `require()` of a JSON file, and the first load of a Node
+built-in such as `node:http`, because the profile does not show them apart. The row shows self time
 and the three largest non-own calls that the function made. Each call shows its area, function
 name, and cost. Use `callees` to inspect deeper leaf work. `top` uses the same ranking by default.
 `top --leaf <function>` answers which own functions caused the selected leaf's self time, and says
