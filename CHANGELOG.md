@@ -12,6 +12,8 @@ may change commands, flags, or output shapes. The version entry will describe ea
 - `top --area` that matches no function prints a `note:` listing the areas the profile has.
 - When module loading is at least half of a CPU profile, the summary prints a `note:` that says so
   and suggests a dynamic `import()`, and its `do:` names `top --by self`.
+- A version bump that lands on `main` now publishes the package. The publish workflow creates the
+  `v<version>` tag and the GitHub release after `npm publish`; nobody pushes a release tag by hand.
 
 ## 0.3.0 (2026-10-01)
 
