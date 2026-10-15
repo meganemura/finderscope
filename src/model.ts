@@ -929,6 +929,12 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
     }
   }
 
+  // Read from the raw frame: a source map moves a module body's printed position off 1:1.
+  const moduleBodyKeys = new Set<string>();
+  for (const [id, node] of input.nodes) {
+    if (node.frame.functionName === "" && node.frame.line === 0 && node.frame.column === 0) moduleBodyKeys.add(info.get(id)!.key);
+  }
+
   const functions = new Map<string, AnalyzedFunction>();
   const areaTotals = new Map<string, number>();
   function ensure(key: string): AnalyzedFunction {
@@ -964,7 +970,7 @@ function analyzeCore(input: AnalyzeCoreInput): ProfileAnalysis {
 
     const ownIndexes = keys.flatMap((key, index) => infoForKeyArea(key, keyMeta) === "own" ? [index] : []);
     const deepestOwnIndex = ownIndexes.at(-1);
-    if (deepestOwnIndex === undefined || loadsModule(keys.slice(deepestOwnIndex + 1), keyMeta)) {
+    if (deepestOwnIndex === undefined || loadsModule(keys.slice(deepestOwnIndex + 1), keyMeta, moduleBodyKeys)) {
       const category = notCausedCategory(keys, keyMeta);
       notCaused.set(category, (notCaused.get(category) ?? 0) + contribution.value);
       continue;
@@ -1036,18 +1042,18 @@ const MODULE_LOAD_FRAMES = new Set(["wrapSafe", "loadSource", "loadESMFromCJS", 
  * An own function that calls import() or require() for a module not yet loaded hands the loader
  * the work a static import does at startup, where no own frame is on the stack, so that work is
  * module loading too. The loaded module's own top level is the deepest own frame of its samples
- * and keeps its cost. A package's top level is an anonymous frame at 1:1, where V8 places a
- * module body. Resolution runs the same frames for a first load as for a cached one, so it
- * stays on the caller.
+ * and keeps its cost. A package's top level is a module body: an anonymous frame that V8 places
+ * at the script's first line and column, before any source map moves it. Resolution runs the
+ * same frames for a first load as for a cached one, so it stays on the caller.
  */
-function loadsModule(below: string[], keyMeta: Map<string, { area: string; name: string }>): boolean {
+function loadsModule(below: string[], keyMeta: Map<string, { area: string; name: string }>, moduleBodyKeys: Set<string>): boolean {
   const entry = below[0];
   if (entry === undefined || infoForKeyArea(entry, keyMeta) !== "node" || !entry.includes(" node:internal/modules/")) return false;
   return below.some((key) => {
     const meta = keyMeta.get(key);
     if (meta === undefined) return false;
     if (meta.area === "node") return MODULE_LOAD_FRAMES.has(meta.name) && key.includes(" node:internal/modules/");
-    return meta.area !== "native" && meta.name === "(anonymous)" && key.endsWith(":1:1");
+    return meta.area !== "native" && moduleBodyKeys.has(key);
   });
 }
 
