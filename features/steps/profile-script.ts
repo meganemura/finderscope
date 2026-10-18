@@ -1,8 +1,11 @@
-import { defineStep, z } from "nukadoko";
-import { spawnSync } from "node:child_process";
+import { defineStep, runCommand, z } from "nukadoko";
 import { BIN } from "./finderscope-bin.js";
 import writeHotScript from "./write-hot-script.js";
 
+// --json is the shape an agent parses; the text report prints the same
+// candidates and do: line. The step runs from the script's directory so --root
+// resolves there, and the scratch directory finderscope keeps lands under the
+// system temp directory.
 export default defineStep({
   description: "Runs `finderscope run --json -- node <script>` from the script's directory and reads the cpu profile's report.",
   pattern: "the agent runs the script under finderscope",
@@ -14,18 +17,12 @@ export default defineStep({
   }),
   from: { dir: [writeHotScript, "dir"], script: [writeHotScript, "script"] },
   mutates: true,
-  rationale:
-    "--json is the shape an agent parses; the text report prints the same candidates and do: line. The step runs from the script's directory so --root resolves there, and the scratch directory finderscope keeps lands under the system temp directory.",
-  run({}, { dir, script }) {
-    const result = spawnSync(process.execPath, [BIN, "run", "--json", "--", process.execPath, script], {
-      cwd: dir,
-      encoding: "utf8",
-    });
-    if (result.error) throw result.error;
+  async run({}, { dir, script }) {
+    const result = await runCommand(process.execPath, [BIN, "run", "--json", "--", process.execPath, script], { cwd: dir });
     const report = JSON.parse(result.stdout);
     const profile = report.profiles[0];
     return {
-      exitCode: result.status ?? 1,
+      exitCode: result.exitCode ?? 1,
       fixCandidates: (profile?.fixCandidates ?? []).map((candidate: { key: string }) => candidate.key),
       next: report.do ?? "",
     };

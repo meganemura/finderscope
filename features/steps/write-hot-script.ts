@@ -16,6 +16,10 @@ while (Date.now() - start < 300) {
 }
 `;
 
+// The script is written fresh rather than read from test/fixtures, so the
+// scenario names its own hot line and does not move when a unit-test fixture
+// changes. 300 ms of busy work keeps the function far above V8's 1 ms sampling
+// interval on a slow CI runner.
 export default defineStep({
   description: "Writes a script whose function settle() keeps the CPU busy for about 300 ms, in a scratch directory.",
   pattern: "a script whose own function spends most of the run on the CPU",
@@ -28,8 +32,6 @@ export default defineStep({
     hotLine: z.number().describe("the 1-based line of the hot function's loop body"),
   }),
   mutates: true,
-  rationale:
-    "The script is written fresh rather than read from test/fixtures, so the scenario names its own hot line and does not move when a unit-test fixture changes. 300 ms of busy work keeps the function far above V8's 1 ms sampling interval on a slow CI runner.",
   run({ scratch }) {
     const dir = scratch.dir("finderscope-scenario");
     const script = join(dir, "settle.js");
